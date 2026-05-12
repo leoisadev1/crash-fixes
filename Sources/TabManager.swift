@@ -2455,15 +2455,16 @@ class TabManager: ObservableObject {
             if wasInFlight, !didClearProbe {
                 let rerunPending = workspaceGitProbeRerunPending(for: probeKey)
                 if rerunPending {
-                    workspaceGitProbeStateByKey[probeKey] = .idle
                     if shouldClearProbe {
-                        cancelWorkspaceGitProbeTimers(for: probeKey)
+                        clearWorkspaceGitProbe(probeKey)
+                    } else {
+                        workspaceGitProbeStateByKey[probeKey] = .idle
+                        scheduleWorkspaceGitMetadataRefreshIfPossible(
+                            workspaceId: probeKey.workspaceId,
+                            panelId: probeKey.panelId,
+                            reason: "rerunPending"
+                        )
                     }
-                    scheduleWorkspaceGitMetadataRefreshIfPossible(
-                        workspaceId: probeKey.workspaceId,
-                        panelId: probeKey.panelId,
-                        reason: "rerunPending"
-                    )
                 } else if shouldClearProbe {
                     clearWorkspaceGitProbe(probeKey)
                 } else {
