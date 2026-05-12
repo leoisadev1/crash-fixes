@@ -983,6 +983,9 @@ final class SocketClient {
     private var socketFD: Int32 = -1
     private var lastConfiguredReceiveTimeout: TimeInterval?
     private var lastOperationTelemetry: CLISocketOperationTelemetry.State?
+    private var hasWrittenCommandOnConnection = false
+    private var lastWriteFailureErrno: Int32?
+    private var lastWriteFailureBytesWritten = 0
     private static let defaultResponseTimeoutSeconds: TimeInterval = 15.0
     private static let multilineResponseIdleTimeoutSeconds: TimeInterval = 0.12
     private static let maxSocketTimeoutSeconds: TimeInterval = 9_007_199_254_740_991
@@ -1106,6 +1109,7 @@ final class SocketClient {
             socketFD = -1
         }
         lastConfiguredReceiveTimeout = nil
+        hasWrittenCommandOnConnection = false
     }
 
     func send(command: String, responseTimeout: TimeInterval? = nil) throws -> String {
@@ -1133,11 +1137,29 @@ final class SocketClient {
         recordOperation(operation)
 
         let payload = command + "\n"
-        try writeAll(
-            Data(payload.utf8),
-            timeoutMessage: "Command timed out",
-            failureMessage: "Failed to write to socket"
-        )
+        let payloadData = Data(payload.utf8)
+        do {
+            try writeAll(
+                payloadData,
+                timeoutMessage: "Command timed out",
+                failureMessage: "Failed to write to socket"
+            )
+        } catch {
+            guard shouldRetryFreshUnixSocketWriteFailure() else {
+                throw error
+            }
+            usleep(50_000)
+            try connect()
+            operation.phase = .writeRequest
+            operation.sawNewline = false
+            recordOperation(operation)
+            try writeAll(
+                payloadData,
+                timeoutMessage: "Command timed out",
+                failureMessage: "Failed to write to socket"
+            )
+        }
+        hasWrittenCommandOnConnection = true
 
         var data = Data()
         var sawNewline = false
@@ -1204,6 +1226,18 @@ final class SocketClient {
             response.removeLast()
         }
         return response
+    }
+
+    private func shouldRetryFreshUnixSocketWriteFailure() -> Bool {
+        guard relayEndpoint == nil else { return false }
+        guard !hasWrittenCommandOnConnection else { return false }
+        guard lastWriteFailureBytesWritten == 0 else { return false }
+        switch lastWriteFailureErrno {
+        case EPIPE?, ECONNRESET?, ENOTCONN?:
+            return true
+        default:
+            return false
+        }
     }
 
     private func connectOnce() throws {
@@ -1416,6 +1450,8 @@ final class SocketClient {
         timeoutMessage: String,
         failureMessage: String
     ) throws {
+        lastWriteFailureErrno = nil
+        lastWriteFailureBytesWritten = 0
         try data.withUnsafeBytes { rawBuffer in
             guard let baseAddress = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
                 return
@@ -1425,6 +1461,8 @@ final class SocketClient {
                 let written = Darwin.write(socketFD, baseAddress.advanced(by: offset), data.count - offset)
                 if written < 0 {
                     let errorCode = errno
+                    lastWriteFailureErrno = errorCode
+                    lastWriteFailureBytesWritten = offset
                     if errorCode == EINTR {
                         continue
                     }
@@ -1438,6 +1476,7 @@ final class SocketClient {
                     )
                 }
                 if written == 0 {
+                    lastWriteFailureBytesWritten = offset
                     close()
                     throw CLIError(message: failureMessage)
                 }
