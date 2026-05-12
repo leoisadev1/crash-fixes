@@ -8,6 +8,22 @@ typeset -g _CMUX_HAS_ZSOCKET=0
 if zmodload zsh/net/unix 2>/dev/null; then
     _CMUX_HAS_ZSOCKET=1
 fi
+typeset -g _CMUX_HAS_ZSELECT=0
+if zmodload zsh/zselect 2>/dev/null; then
+    _CMUX_HAS_ZSELECT=1
+fi
+
+_cmux_sleep_seconds() {
+    local seconds="${1:-1}"
+    if (( _CMUX_HAS_ZSELECT )); then
+        local -i centiseconds
+        centiseconds=$(( seconds * 100 ))
+        (( centiseconds < 1 )) && centiseconds=1
+        zselect -t "$centiseconds" >/dev/null 2>&1 || true
+        return 0
+    fi
+    sleep "$seconds"
+}
 
 _cmux_send() {
     local payload="$1"
@@ -925,14 +941,14 @@ _cmux_run_pr_probe_with_timeout() {
     probe_pid=$!
 
     while kill -0 "$probe_pid" >/dev/null 2>&1; do
-        sleep 1
+        _cmux_sleep_seconds 1
         now="${EPOCHSECONDS:-$SECONDS}"
         if (( _CMUX_ASYNC_JOB_TIMEOUT > 0 )) && (( now - started_at >= _CMUX_ASYNC_JOB_TIMEOUT )); then
             _cmux_kill_process_tree "$probe_pid" TERM
-            sleep 0.2
+            _cmux_sleep_seconds 0.2
             if kill -0 "$probe_pid" >/dev/null 2>&1; then
                 _cmux_kill_process_tree "$probe_pid" KILL
-                sleep 0.2
+                _cmux_sleep_seconds 0.2
             fi
             if ! kill -0 "$probe_pid" >/dev/null 2>&1; then
                 wait "$probe_pid" >/dev/null 2>&1 || true
@@ -1003,7 +1019,7 @@ _cmux_start_pr_poll_loop() {
                 if [[ -n "$signal_path" && -f "$signal_path" ]]; then
                     break
                 fi
-                sleep 1
+                _cmux_sleep_seconds 1
                 slept=$(( slept + 1 ))
             done
         done
@@ -1039,7 +1055,7 @@ _cmux_start_git_head_watch() {
     {
         local last_signature="$watch_head_signature"
         while true; do
-            sleep 1
+            _cmux_sleep_seconds 1
 
             local signature
             signature="$(_cmux_git_head_signature "$watch_head_path" 2>/dev/null || true)"
