@@ -1424,6 +1424,19 @@ class TabManager: ObservableObject {
         reason: String
     ) {
         let key = WorkspaceGitProbeKey(workspaceId: workspaceId, panelId: panelId)
+        if let workspace = tabs.first(where: { $0.id == workspaceId }),
+           let branch = Self.normalizedBranchName(
+               workspace.panelGitBranches[panelId]?.branch
+                   ?? workspace.panelPullRequests[panelId]?.branch
+           ),
+           Self.shouldSkipWorkspacePullRequestLookup(branch: branch) {
+            if workspace.panelPullRequests[panelId] != nil {
+                workspace.clearPanelPullRequest(panelId: panelId)
+            }
+            clearWorkspacePullRequestTracking(for: key)
+            return
+        }
+
         let shouldBypassRepoCache = !Self.workspacePullRequestRefreshAllowsRepoCache(reason: reason)
         if shouldBypassRepoCache, workspacePullRequestRefreshTask != nil {
             workspacePullRequestFollowUpShouldBypassRepoCache = true
@@ -1443,6 +1456,25 @@ class TabManager: ObservableObject {
         )
 #endif
         refreshTrackedWorkspacePullRequestsIfNeeded(reason: reason)
+    }
+
+    private func shouldScheduleWorkspacePullRequestRefreshFromLocalGitProbe(
+        key: WorkspaceGitProbeKey,
+        previousBranch: String?,
+        nextBranch: String
+    ) -> Bool {
+        guard previousBranch == nextBranch else {
+            return true
+        }
+
+        if case .inFlight = workspacePullRequestProbeStateByKey[key] {
+            return false
+        }
+
+        guard let nextPollAt = workspacePullRequestNextPollAtByKey[key] else {
+            return true
+        }
+        return nextPollAt <= Date()
     }
 
     private func applyWorkspacePullRequestRefreshResults(
@@ -1722,12 +1754,15 @@ class TabManager: ObservableObject {
     }
 
     nonisolated static func workspacePullRequestRefreshAllowsRepoCache(reason: String) -> Bool {
-        let periodicPrefixes = [
+        let cacheablePrefixes = [
+            "directoryChange",
+            "localGitProbe",
             "periodicPoll",
             "selectedPeriodicPoll",
+            "shellPrompt",
             "timer",
         ]
-        return periodicPrefixes.contains { prefix in
+        return cacheablePrefixes.contains { prefix in
             reason == prefix || reason.hasPrefix("\(prefix).")
         }
     }
@@ -2430,6 +2465,7 @@ class TabManager: ObservableObject {
         }
 
         let nextBranch = snapshot.branch
+        let previousBranch = workspace.panelGitBranches[probeKey.panelId]?.branch
         if let nextBranch {
             workspace.updatePanelGitBranch(
                 panelId: probeKey.panelId,
@@ -2459,7 +2495,12 @@ class TabManager: ObservableObject {
             break
         }
 
-        if snapshot.branch != nil {
+        if let nextBranch,
+           shouldScheduleWorkspacePullRequestRefreshFromLocalGitProbe(
+               key: probeKey,
+               previousBranch: previousBranch,
+               nextBranch: nextBranch
+           ) {
             scheduleWorkspacePullRequestRefresh(
                 workspaceId: probeKey.workspaceId,
                 panelId: probeKey.panelId,

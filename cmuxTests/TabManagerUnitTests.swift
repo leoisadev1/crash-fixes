@@ -445,17 +445,22 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
         XCTAssertFalse(TabManager.shouldSkipWorkspacePullRequestLookup(branch: "release/master-fix"))
     }
 
-    func testWorkspacePullRequestRefreshAllowsRepoCacheForTimerAndPeriodicReasons() {
+    func testWorkspacePullRequestRefreshAllowsRepoCacheForRepeatedMetadataReasons() {
+        XCTAssertTrue(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "directoryChange"))
+        XCTAssertTrue(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "directoryChange.followUp"))
+        XCTAssertTrue(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "localGitProbe"))
+        XCTAssertTrue(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "localGitProbe.followUp"))
         XCTAssertTrue(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "periodicPoll"))
         XCTAssertTrue(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "periodicPoll.followUp"))
         XCTAssertTrue(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "selectedPeriodicPoll"))
         XCTAssertTrue(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "selectedPeriodicPoll.followUp"))
+        XCTAssertTrue(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "shellPrompt"))
+        XCTAssertTrue(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "shellPrompt.followUp"))
         XCTAssertTrue(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "timer"))
         XCTAssertTrue(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "timer.followUp"))
 
         XCTAssertFalse(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "branchChange"))
         XCTAssertFalse(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "branchChange.followUp"))
-        XCTAssertFalse(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "shellPrompt"))
         XCTAssertFalse(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "commandHint:merge"))
     }
 
