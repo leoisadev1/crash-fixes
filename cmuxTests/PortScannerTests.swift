@@ -12,6 +12,23 @@ final class PortScannerProcessCaptureTests: XCTestCase {
         try? FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count
     }
 
+    func testAgentPortRescanCadenceWarmsThenIdles() {
+        let now: TimeInterval = 100
+        let deadline = AgentPortRescanCadence.fastDeadline(after: now)
+
+        XCTAssertEqual(deadline, now + AgentPortRescanCadence.fastWindow)
+        XCTAssertEqual(
+            AgentPortRescanCadence.resolve(now: deadline - 0.1, fastUntil: deadline),
+            .fast
+        )
+        XCTAssertEqual(
+            AgentPortRescanCadence.resolve(now: deadline, fastUntil: deadline),
+            .idle
+        )
+        XCTAssertEqual(AgentPortRescanCadence.fast.interval, 2)
+        XCTAssertEqual(AgentPortRescanCadence.idle.interval, 15)
+    }
+
     func testCaptureStandardOutputDoesNotLeakPipeFDs() throws {
         guard let baseline = openFDCount() else {
             throw XCTSkip("Unable to inspect /dev/fd on this runner")

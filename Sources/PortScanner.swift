@@ -1,5 +1,34 @@
 import Foundation
 
+enum AgentPortRescanCadence: Equatable {
+    case fast
+    case idle
+
+    static let fastInterval: TimeInterval = 2
+    static let idleInterval: TimeInterval = 15
+    static let fastWindow: TimeInterval = 30
+
+    var interval: TimeInterval {
+        switch self {
+        case .fast:
+            return Self.fastInterval
+        case .idle:
+            return Self.idleInterval
+        }
+    }
+
+    static func fastDeadline(after now: TimeInterval) -> TimeInterval {
+        now + fastWindow
+    }
+
+    static func resolve(now: TimeInterval, fastUntil: TimeInterval?) -> AgentPortRescanCadence {
+        if let fastUntil, now < fastUntil {
+            return .fast
+        }
+        return .idle
+    }
+}
+
 /// Batched port scanner that replaces per-shell `ps + lsof` scanning.
 ///
 /// Each shell sends a lightweight `report_tty` + `ports_kick` over the socket.
@@ -47,12 +76,13 @@ final class PortScanner: @unchecked Sendable {
 
     /// Periodic timer for agent-owned process trees that aren't attached to a TTY.
     private var agentScanTimer: DispatchSourceTimer?
+    private var agentScanCadence: AgentPortRescanCadence?
+    private var agentFastScanUntilUptime: TimeInterval?
 
     /// Burst scan offsets in seconds from the start of the burst.
     /// Each scan fires at this absolute offset; the recursive scheduler
     /// converts to relative delays between consecutive scans.
     private static let burstOffsets: [Double] = [0.5, 1.5, 3, 5, 7.5, 10]
-    private static let agentRescanInterval: TimeInterval = 2
 
     // MARK: - Public API
 
@@ -251,6 +281,9 @@ final class PortScanner: @unchecked Sendable {
             trackedAgentWorkspaces.remove(workspaceId)
         } else {
             trackedAgentWorkspaces.insert(workspaceId)
+            agentFastScanUntilUptime = AgentPortRescanCadence.fastDeadline(
+                after: ProcessInfo.processInfo.systemUptime
+            )
         }
         updateAgentScanTimerLocked()
 
@@ -265,19 +298,33 @@ final class PortScanner: @unchecked Sendable {
         guard !trackedAgentWorkspaces.isEmpty else {
             agentScanTimer?.cancel()
             agentScanTimer = nil
+            agentScanCadence = nil
+            agentFastScanUntilUptime = nil
             return
         }
-        guard agentScanTimer == nil else { return }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        let cadence = AgentPortRescanCadence.resolve(
+            now: now,
+            fastUntil: agentFastScanUntilUptime
+        )
+        if cadence == .idle {
+            agentFastScanUntilUptime = nil
+        }
+        guard agentScanTimer == nil || agentScanCadence != cadence else { return }
+
+        agentScanTimer?.cancel()
 
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(
-            deadline: .now() + Self.agentRescanInterval,
-            repeating: Self.agentRescanInterval
+            deadline: .now() + cadence.interval,
+            repeating: cadence.interval
         )
         timer.setEventHandler { [weak self] in
             self?.runTrackedAgentScan()
         }
         agentScanTimer = timer
+        agentScanCadence = cadence
         timer.resume()
     }
 
@@ -336,6 +383,7 @@ final class PortScanner: @unchecked Sendable {
             agentPIDsByWorkspace: normalizedPIDsByWorkspace,
             agentRevisions: agentRevisions
         )
+        updateAgentScanTimerLocked()
     }
 
     private func scanAgentPorts(
