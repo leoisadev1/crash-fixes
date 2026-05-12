@@ -1014,6 +1014,7 @@ class TabManager: ObservableObject {
     )
     private var workspaceGitProbeStateByKey: [WorkspaceGitProbeKey: WorkspaceGitProbeState] = [:]
     private var workspaceGitProbeTimersByKey: [WorkspaceGitProbeKey: [DispatchSourceTimer]] = [:]
+    private var workspaceGitProbeExpectedDirectoryByKey: [WorkspaceGitProbeKey: String] = [:]
     private var workspaceGitTrackedDirectoryByKey: [WorkspaceGitProbeKey: String] = [:]
     private var workspaceGitMetadataSnapshotTasksByDirectory: [
         String: Task<InitialWorkspaceGitMetadataSnapshot, Never>
@@ -2355,10 +2356,28 @@ class TabManager: ObservableObject {
     ) {
         let normalizedDirectory = normalizeDirectory(directory)
         let key = WorkspaceGitProbeKey(workspaceId: workspaceId, panelId: panelId)
+        let targetAlreadyActive = isWorkspaceGitMetadataProbePendingOrInFlight(key)
+        if !targetAlreadyActive,
+           let existingKey = coalescingWorkspaceGitMetadataProbeKey(
+            workspaceId: workspaceId,
+            panelId: panelId,
+            directory: normalizedDirectory
+           ) {
+#if DEBUG
+            cmuxDebugLog(
+                "workspace.gitProbe.skip workspace=\(workspaceId.uuidString.prefix(5)) " +
+                "panel=\(panelId.uuidString.prefix(5)) reason=coalesced " +
+                "existingPanel=\(existingKey.panelId.uuidString.prefix(5)) dir=\(normalizedDirectory)"
+            )
+#endif
+            return
+        }
+
         cancelWorkspaceGitProbeTimers(for: key)
         if workspaceGitProbeStateByKey[key] == nil {
             workspaceGitProbeStateByKey[key] = .idle
         }
+        workspaceGitProbeExpectedDirectoryByKey[key] = normalizedDirectory
 
 #if DEBUG
         cmuxDebugLog(
@@ -2385,6 +2404,33 @@ class TabManager: ObservableObject {
             timer.resume()
         }
         workspaceGitProbeTimersByKey[key] = timers
+    }
+
+    private func coalescingWorkspaceGitMetadataProbeKey(
+        workspaceId: UUID,
+        panelId: UUID,
+        directory: String
+    ) -> WorkspaceGitProbeKey? {
+        workspaceGitProbeExpectedDirectoryByKey
+            .filter { key, expectedDirectory in
+                key.workspaceId == workspaceId
+                    && key.panelId != panelId
+                    && expectedDirectory == directory
+                    && isWorkspaceGitMetadataProbePendingOrInFlight(key)
+            }
+            .map(\.key)
+            .sorted { $0.panelId.uuidString < $1.panelId.uuidString }
+            .first
+    }
+
+    private func isWorkspaceGitMetadataProbePendingOrInFlight(_ key: WorkspaceGitProbeKey) -> Bool {
+        if workspaceGitProbeTimersByKey[key] != nil {
+            return true
+        }
+        if case .inFlight = workspaceGitProbeStateByKey[key] {
+            return true
+        }
+        return false
     }
 
     private func beginWorkspaceGitMetadataProbeAttempt(
@@ -2468,6 +2514,7 @@ class TabManager: ObservableObject {
     private func clearWorkspaceGitProbe(_ key: WorkspaceGitProbeKey) {
         workspaceGitProbeStateByKey.removeValue(forKey: key)
         cancelWorkspaceGitProbeTimers(for: key)
+        workspaceGitProbeExpectedDirectoryByKey.removeValue(forKey: key)
     }
 
     private func clearWorkspaceGitProbes(workspaceId: UUID) {
@@ -2477,6 +2524,9 @@ class TabManager: ObservableObject {
             clearWorkspaceGitProbe(key)
         }
         workspaceGitTrackedDirectoryByKey = workspaceGitTrackedDirectoryByKey.filter { key, _ in
+            key.workspaceId != workspaceId
+        }
+        workspaceGitProbeExpectedDirectoryByKey = workspaceGitProbeExpectedDirectoryByKey.filter { key, _ in
             key.workspaceId != workspaceId
         }
         clearWorkspacePullRequestTracking(workspaceId: workspaceId)
@@ -2522,30 +2572,61 @@ class TabManager: ObservableObject {
             didClearProbe = true
             return
         }
-        guard workspace.panels[probeKey.panelId] != nil else {
-            clearWorkspaceGitProbe(probeKey)
-            didClearProbe = true
-            return
-        }
-
-        guard let currentDirectory = gitProbeDirectory(for: workspace, panelId: probeKey.panelId) else {
-            clearWorkspaceGitProbe(probeKey)
-            didClearProbe = true
-            return
-        }
-        if currentDirectory != expectedDirectory {
+        let matchingPanelIds = workspaceGitMetadataFanoutPanelIds(
+            in: workspace,
+            expectedDirectory: expectedDirectory
+        )
+        guard !matchingPanelIds.isEmpty else {
             clearWorkspaceGitProbe(probeKey)
             didClearProbe = true
 #if DEBUG
             cmuxDebugLog(
                 "workspace.gitProbe.skip workspace=\(probeKey.workspaceId.uuidString.prefix(5)) " +
-                "panel=\(probeKey.panelId.uuidString.prefix(5)) reason=directoryChanged " +
-                "expected=\(expectedDirectory) current=\(currentDirectory)"
+                "panel=\(probeKey.panelId.uuidString.prefix(5)) reason=noMatchingDirectory " +
+                "expected=\(expectedDirectory)"
             )
 #endif
             return
         }
 
+        if !matchingPanelIds.contains(probeKey.panelId) {
+            clearWorkspaceGitProbe(probeKey)
+            didClearProbe = true
+        }
+
+        for panelId in matchingPanelIds {
+            let fanoutKey = WorkspaceGitProbeKey(workspaceId: probeKey.workspaceId, panelId: panelId)
+            if fanoutKey != probeKey,
+               workspaceGitProbeExpectedDirectoryByKey[fanoutKey] == expectedDirectory {
+                clearWorkspaceGitProbe(fanoutKey)
+            }
+            applyWorkspaceGitMetadataSnapshotToPanel(
+                snapshot,
+                workspace: workspace,
+                panelId: panelId,
+                expectedDirectory: expectedDirectory
+            )
+        }
+    }
+
+    private func workspaceGitMetadataFanoutPanelIds(
+        in workspace: Workspace,
+        expectedDirectory: String
+    ) -> [UUID] {
+        workspace.panels.keys
+            .filter { panelId in
+                gitProbeDirectory(for: workspace, panelId: panelId) == expectedDirectory
+            }
+            .sorted { $0.uuidString < $1.uuidString }
+    }
+
+    private func applyWorkspaceGitMetadataSnapshotToPanel(
+        _ snapshot: InitialWorkspaceGitMetadataSnapshot,
+        workspace: Workspace,
+        panelId: UUID,
+        expectedDirectory: String
+    ) {
+        let probeKey = WorkspaceGitProbeKey(workspaceId: workspace.id, panelId: panelId)
         workspace.updatePanelDirectory(panelId: probeKey.panelId, directory: expectedDirectory)
 
         let resolvedPullRequest: SidebarPullRequestState? = {

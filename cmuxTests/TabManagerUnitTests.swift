@@ -569,6 +569,76 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
         )
     }
 
+    func testInitialGitMetadataProbeFansOutToSameDirectorySplitPanels() throws {
+        let fileManager = FileManager.default
+        let directoryURL = fileManager.temporaryDirectory.appendingPathComponent(
+            "cmux-git-fanout-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directoryURL) }
+
+        TabManager.commandRunnerForTesting = { _, _, arguments, _ in
+            Thread.sleep(forTimeInterval: 0.05)
+            if arguments == ["branch", "--show-current"] {
+                return TabManager.CommandResult(
+                    stdout: "main\n",
+                    stderr: "",
+                    exitStatus: 0,
+                    timedOut: false,
+                    executionError: nil
+                )
+            }
+            if arguments == ["status", "--porcelain", "-uno"] {
+                return TabManager.CommandResult(
+                    stdout: "",
+                    stderr: "",
+                    exitStatus: 0,
+                    timedOut: false,
+                    executionError: nil
+                )
+            }
+            return TabManager.CommandResult(
+                stdout: "",
+                stderr: "",
+                exitStatus: 1,
+                timedOut: false,
+                executionError: nil
+            )
+        }
+        defer { TabManager.commandRunnerForTesting = nil }
+
+        let manager = TabManager()
+        guard let workspace = manager.selectedWorkspace,
+              let sourcePanelId = workspace.focusedPanelId else {
+            XCTFail("Expected selected workspace with focused panel")
+            return
+        }
+        workspace.currentDirectory = directoryURL.path
+
+        manager.scheduleInitialWorkspaceGitMetadataRefreshIfPossible(
+            workspaceId: workspace.id,
+            panelId: sourcePanelId
+        )
+
+        guard let splitPanel = workspace.newTerminalSplit(
+            from: sourcePanelId,
+            orientation: .horizontal,
+            focus: false
+        ) else {
+            XCTFail("Expected split panel")
+            return
+        }
+
+        XCTAssertTrue(
+            waitForCondition {
+                workspace.panelGitBranches[sourcePanelId]?.branch == "main"
+                    && workspace.panelGitBranches[splitPanel.id]?.branch == "main"
+            }
+        )
+        XCTAssertTrue(manager.activeWorkspaceGitProbePanelIdsForTesting(workspaceId: workspace.id).isEmpty)
+    }
+
     func testTrackedWorkspaceGitMetadataPollCandidatesExcludeDirectoriesWithoutResolvedGitMetadata() throws {
         let fileManager = FileManager.default
         let directoryURL = fileManager.temporaryDirectory.appendingPathComponent(
