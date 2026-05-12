@@ -863,6 +863,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
     private var lastSessionAutosaveFingerprint: Int?
     private var lastSessionAutosavePersistedAt: Date = .distantPast
+    private var lastSessionAutosaveRestorableAgentIndex: RestorableAgentSessionIndex = .empty
+    private var lastSessionAutosaveRestorableAgentScanAt: Date = .distantPast
     private var lastTypingActivityAt: TimeInterval = 0
     var didHandleExplicitOpenIntentAtStartup = false
     private var didScheduleInitialMainWindowBootstrap = false
@@ -3454,6 +3456,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let timingStart = CmuxTypingTiming.start()
         let phaseStart = ProcessInfo.processInfo.systemUptime
         var fingerprintMs: Double = 0
+        var restorableAgentScanMs: Double = 0
         var saveMs: Double = 0
         defer {
             sessionAutosaveTickInFlight = false
@@ -3464,6 +3467,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 thresholdMs: 2.0,
                 parts: [
                     ("fingerprintMs", fingerprintMs),
+                    ("restorableAgentScanMs", restorableAgentScanMs),
                     ("saveMs", saveMs),
                 ],
                 extra: "source=\(source)"
@@ -3482,14 +3486,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 #if DEBUG
         let fingerprintStart = ProcessInfo.processInfo.systemUptime
 #endif
-        let restorableAgentIndex = await RestorableAgentSessionIndex.loadIncludingProcessDetectedSnapshots()
-        let autosaveFingerprint = sessionAutosaveFingerprint(
+        var restorableAgentIndex = lastSessionAutosaveRestorableAgentIndex
+        var autosaveFingerprint = sessionAutosaveFingerprint(
             includeScrollback: false,
             restorableAgentIndex: restorableAgentIndex
         )
 #if DEBUG
         fingerprintMs = (ProcessInfo.processInfo.systemUptime - fingerprintStart) * 1000.0
 #endif
+        let shouldRefreshRestorableAgentIndex = Self.shouldRefreshRestorableAgentIndexForAutosave(
+            lastRefreshedAt: lastSessionAutosaveRestorableAgentScanAt,
+            now: now
+        )
+
+        if !shouldRefreshRestorableAgentIndex,
+           Self.shouldSkipSessionAutosaveForUnchangedFingerprint(
+                isTerminatingApp: isTerminatingApp,
+                includeScrollback: false,
+                previousFingerprint: lastSessionAutosaveFingerprint,
+                currentFingerprint: autosaveFingerprint,
+                lastPersistedAt: lastSessionAutosavePersistedAt,
+                now: now
+            ) {
+#if DEBUG
+            cmuxDebugLog(
+                "session.save.skipped reason=unchanged_autosave_fingerprint includeScrollback=0 source=\(source)"
+            )
+#endif
+            return
+        }
+
+        if shouldRefreshRestorableAgentIndex {
+#if DEBUG
+            let restorableAgentScanStart = ProcessInfo.processInfo.systemUptime
+#endif
+            restorableAgentIndex = await RestorableAgentSessionIndex.loadIncludingProcessDetectedSnapshots()
+            lastSessionAutosaveRestorableAgentIndex = restorableAgentIndex
+            lastSessionAutosaveRestorableAgentScanAt = Date()
+#if DEBUG
+            restorableAgentScanMs = (ProcessInfo.processInfo.systemUptime - restorableAgentScanStart) * 1000.0
+            let refreshedFingerprintStart = ProcessInfo.processInfo.systemUptime
+#endif
+            autosaveFingerprint = sessionAutosaveFingerprint(
+                includeScrollback: false,
+                restorableAgentIndex: restorableAgentIndex
+            )
+#if DEBUG
+            fingerprintMs += (ProcessInfo.processInfo.systemUptime - refreshedFingerprintStart) * 1000.0
+#endif
+        }
+
         if Self.shouldSkipSessionAutosaveForUnchangedFingerprint(
             isTerminatingApp: isTerminatingApp,
             includeScrollback: false,
@@ -3555,6 +3601,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return true
         }
         return now.timeIntervalSince(lastPersistedAt) < maximumAutosaveSkippableInterval
+    }
+
+    nonisolated static func shouldRefreshRestorableAgentIndexForAutosave(
+        lastRefreshedAt: Date,
+        now: Date,
+        minimumInterval: TimeInterval = SessionPersistencePolicy.autosaveRestorableAgentProcessDetectionInterval
+    ) -> Bool {
+        guard minimumInterval.isFinite, minimumInterval > 0 else { return true }
+        let elapsed = now.timeIntervalSince(lastRefreshedAt)
+        return elapsed < 0 || elapsed >= minimumInterval
     }
 
     private func updateSessionAutosaveSaveState(
