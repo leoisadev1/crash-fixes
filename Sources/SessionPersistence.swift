@@ -404,7 +404,6 @@ enum SessionPersistenceStore {
 
     private static func encodedSnapshotData(_ snapshot: AppSessionSnapshot) throws -> Data {
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
         return try encoder.encode(snapshot)
     }
 

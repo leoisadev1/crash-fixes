@@ -3686,7 +3686,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
 
         if synchronously {
-            writeBlock()
+            sessionPersistenceQueue.sync(execute: writeBlock)
         } else {
             sessionPersistenceQueue.async(execute: writeBlock)
         }
