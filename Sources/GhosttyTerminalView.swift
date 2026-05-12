@@ -9965,9 +9965,11 @@ final class GhosttySurfaceScrollView: NSView {
     private var pendingDropZone: DropZone?
     private var dropZoneOverlayAnimationGeneration: UInt64 = 0
     private var pendingAutomaticFirstResponderApply = false
+    private var lastAutomaticFirstResponderApplyScheduledAt: CFTimeInterval = 0
     private var pendingSurfaceRefreshQueued = false
     private var pendingSurfaceRefreshReason = "portal.refreshSurfaceNow"
     // Intentionally no focus retry loops: rely on AppKit first-responder and bonsplit selection.
+    private static let automaticFirstResponderApplyMinimumInterval: CFTimeInterval = 0.05
 
     /// Tracks whether keyboard focus should go to the search field or the terminal
     /// when the window becomes key while the find bar is open.
@@ -12109,7 +12111,19 @@ final class GhosttySurfaceScrollView: NSView {
     private func scheduleAutomaticFirstResponderApply(reason: String) {
         guard !pendingAutomaticFirstResponderApply else { return }
         pendingAutomaticFirstResponderApply = true
-        DispatchQueue.main.async { [weak self] in
+        let now = CACurrentMediaTime()
+        let delay: CFTimeInterval
+        if lastAutomaticFirstResponderApplyScheduledAt == 0 {
+            delay = 0
+        } else {
+            delay = max(
+                0,
+                Self.automaticFirstResponderApplyMinimumInterval - (now - lastAutomaticFirstResponderApplyScheduledAt)
+            )
+        }
+        lastAutomaticFirstResponderApplyScheduledAt = now + delay
+
+        let apply = { [weak self] in
             guard let self else { return }
             self.pendingAutomaticFirstResponderApply = false
 #if DEBUG
@@ -12117,6 +12131,11 @@ final class GhosttySurfaceScrollView: NSView {
             cmuxDebugLog("find.applyFirstResponder.defer surface=\(surfaceShort) reason=\(reason)")
 #endif
             self.applyFirstResponderIfNeeded()
+        }
+        if delay > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: apply)
+        } else {
+            DispatchQueue.main.async(execute: apply)
         }
     }
 
