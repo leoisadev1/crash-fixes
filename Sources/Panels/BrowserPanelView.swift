@@ -6492,10 +6492,13 @@ struct WebViewRepresentable: NSViewRepresentable {
             // Only the host that currently owns the portal is allowed to hide it.
             // Older keep-alive hosts can still receive updates after a new owner binds.
             if didReleasePortalHost {
-                BrowserWindowPortalRegistry.hide(
-                    webView: webView,
-                    source: "viewStateChanged.\(portalHideReason)"
+                BrowserWindowPortalRegistry.detach(webView: webView)
+#if DEBUG
+                cmuxDebugLog(
+                    "browser.portal.detachForViewState panel=\(panel.id.uuidString.prefix(5)) " +
+                    "reason=\(portalHideReason) web=\(Self.objectID(webView))"
                 )
+#endif
             }
         } else {
             didReleasePortalHost = false

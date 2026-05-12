@@ -12381,10 +12381,13 @@ final class Workspace: Identifiable, ObservableObject {
                             zPriority: 0
                         )
                     }
-                    BrowserWindowPortalRegistry.hide(
-                        webView: browserPanel.webView,
-                        source: reason
+                    BrowserWindowPortalRegistry.detach(webView: browserPanel.webView)
+#if DEBUG
+                    cmuxDebugLog(
+                        "browser.portal.detachForWorkspaceVisibility panel=\(browserPanel.id.uuidString.prefix(5)) " +
+                        "reason=\(reason) web=\(ObjectIdentifier(browserPanel.webView))"
                     )
+#endif
                     didChange = true
                 }
             }
