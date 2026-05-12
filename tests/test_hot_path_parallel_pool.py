@@ -100,9 +100,15 @@ def run_hot_path_claude_pre_tool_use(
 
 
 class FakeJSONRPCSocketServer:
-    def __init__(self, socket_path: str, response_delay: float) -> None:
+    def __init__(
+        self,
+        socket_path: str,
+        response_delay: float,
+        response_gate: threading.Event | None = None,
+    ) -> None:
         self.socket_path = socket_path
         self.response_delay = response_delay
+        self.response_gate = response_gate
         self._ready = threading.Event()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._serve, daemon=True)
@@ -171,12 +177,16 @@ class FakeJSONRPCSocketServer:
                     except json.JSONDecodeError:
                         with self._lock:
                             self.methods.append(decoded.split(" ", 1)[0])
+                        if self.response_gate is not None:
+                            self.response_gate.wait(timeout=5.0)
                         if self.response_delay > 0:
                             time.sleep(self.response_delay)
                         conn.sendall(b"OK\n")
                         continue
                     with self._lock:
                         self.methods.append(str(request.get("method", "")))
+                    if self.response_gate is not None:
+                        self.response_gate.wait(timeout=5.0)
                     if self.response_delay > 0:
                         time.sleep(self.response_delay)
                     response = {"id": request.get("id"), "ok": True, "result": {"queued": True}}
@@ -218,6 +228,7 @@ def main() -> int:
         server.start()
         burst_total_connections = 0
         burst_max_active_connections = 0
+        burst_telemetry_methods = 0
         try:
             params = json.dumps(
                 {
@@ -276,14 +287,90 @@ def main() -> int:
                     f"saw {server.total_connections}"
                 )
 
-            if not server.wait_for_method_count(100, timeout=30.0):
-                failures.append(f"expected 100 telemetry methods, got {server.method_count()}")
+            if not server.wait_for_method_count(1, timeout=30.0):
+                failures.append(f"expected at least one telemetry method, got {server.method_count()}")
             else:
                 methods = server.methods_snapshot()
                 if set(methods) != {"surface.telemetry"}:
                     failures.append(f"expected only surface.telemetry, got {methods!r}")
+            burst_telemetry_methods = server.method_count()
             burst_total_connections = server.total_connections
             burst_max_active_connections = server.max_active_connections
+
+            coalesce_gate = threading.Event()
+            coalesce_app_socket = str(root / "coalesce.sock")
+            coalesce_broker_socket = str(root / "coalesce-broker.sock")
+            coalesce_server = FakeJSONRPCSocketServer(
+                socket_path=coalesce_app_socket,
+                response_delay=0.0,
+                response_gate=coalesce_gate,
+            )
+            coalesce_server.start()
+            try:
+                coalesce_procs: list[subprocess.Popen[str]] = []
+                for index in range(40):
+                    coalesce_params = json.dumps(
+                        {
+                            "workspace_id": "11111111-1111-1111-1111-111111111111",
+                            "surface_id": "22222222-2222-2222-2222-222222222222",
+                            "tty_name": f"ttys{index}",
+                            "reason": "coalesce",
+                        }
+                    )
+                    coalesce_procs.append(
+                        subprocess.Popen(
+                            [
+                                cli_path,
+                                "--socket",
+                                coalesce_app_socket,
+                                "__hot-path",
+                                "--broker-socket",
+                                coalesce_broker_socket,
+                                "rpc",
+                                "surface.telemetry",
+                                coalesce_params,
+                            ],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                            env=env,
+                        )
+                    )
+
+                if not coalesce_server.wait_for_method_count(1, timeout=10.0):
+                    failures.append("coalescing test never reached the blocked first telemetry send")
+
+                for index, proc in enumerate(coalesce_procs):
+                    try:
+                        _, stderr = proc.communicate(timeout=15.0)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        _, stderr = proc.communicate()
+                        failures.append(f"coalescing request {index} timed out: stderr={stderr!r}")
+                        continue
+                    if proc.returncode != 0:
+                        failures.append(f"coalescing request {index} exited {proc.returncode}: stderr={stderr!r}")
+
+                time.sleep(0.2)
+                coalesce_gate.set()
+                deadline = time.monotonic() + 3.0
+                last_count = -1
+                while time.monotonic() < deadline:
+                    count = coalesce_server.method_count()
+                    if count == last_count:
+                        break
+                    last_count = count
+                    time.sleep(0.1)
+
+                coalesced_count = coalesce_server.method_count()
+                if coalesced_count > 3:
+                    failures.append(
+                        "expected gated telemetry burst to coalesce to at most first+latest sends, "
+                        f"got {coalesced_count}"
+                    )
+            finally:
+                coalesce_gate.set()
+                coalesce_server.stop()
 
             stall_env = {
                 **env,
@@ -363,6 +450,7 @@ def main() -> int:
             ("Parallel calls", "100"),
             ("App socket connections", str(burst_total_connections)),
             ("Max concurrent app socket connections", str(burst_max_active_connections)),
+            ("Telemetry sends after coalescing", str(burst_telemetry_methods)),
             ("Fan-out reduction vs one socket per call", f"{reduction:.1f}x"),
         ],
     )

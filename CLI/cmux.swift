@@ -2532,8 +2532,11 @@ struct CMUXCLI {
 
         let workerQueue = DispatchQueue(label: "com.cmux.hot-path-broker.worker")
         let telemetryQueue = DispatchQueue(label: "com.cmux.hot-path-broker.telemetry")
+        let telemetryStateLock = NSLock()
         var sharedClient: SocketClient?
         var sharedTelemetryClient: SocketClient?
+        var latestTelemetryParams: [String: Any]?
+        var telemetryFlushScheduled = false
         var lastActivity = Date()
         let processEnvironment = ProcessInfo.processInfo.environment
         let idleTimeout = hotPathBrokerIdleTimeout(from: processEnvironment)
@@ -2593,6 +2596,37 @@ struct CMUXCLI {
             }
         }
 
+        func scheduleTelemetryFlush(params: [String: Any]) {
+            var shouldSchedule = false
+            telemetryStateLock.lock()
+            latestTelemetryParams = params
+            if !telemetryFlushScheduled {
+                telemetryFlushScheduled = true
+                shouldSchedule = true
+            }
+            telemetryStateLock.unlock()
+
+            guard shouldSchedule else { return }
+            telemetryQueue.async {
+                while true {
+                    telemetryStateLock.lock()
+                    guard let paramsToSend = latestTelemetryParams else {
+                        telemetryFlushScheduled = false
+                        telemetryStateLock.unlock()
+                        break
+                    }
+                    latestTelemetryParams = nil
+                    telemetryStateLock.unlock()
+
+                    do {
+                        _ = try withTelemetryClient { client in
+                            try client.sendV2(method: "surface.telemetry", params: paramsToSend)
+                        }
+                    } catch {}
+                }
+            }
+        }
+
         func performWorkerSync<T>(_ body: @escaping () throws -> T) throws -> T {
             var result: Result<T, Error>!
             workerQueue.sync {
@@ -2628,13 +2662,7 @@ struct CMUXCLI {
                 let params = request["params"] as? [String: Any] ?? [:]
 
                 if method == "surface.telemetry" {
-                    telemetryQueue.async {
-                        do {
-                            _ = try withTelemetryClient { client in
-                                try client.sendV2(method: method, params: params)
-                            }
-                        } catch {}
-                    }
+                    scheduleTelemetryFlush(params: params)
                     return ["ok": true, "stdout": ""]
                 }
 
