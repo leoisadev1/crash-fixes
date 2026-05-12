@@ -922,6 +922,7 @@ class TabManager: ObservableObject {
     private nonisolated static let workspacePullRequestTerminalStateSweepInterval: TimeInterval = 15 * 60
     private nonisolated static let workspacePullRequestPollJitterFraction = 0.10
     private nonisolated static let workspacePullRequestProbeTimeout: TimeInterval = 5.0
+    private nonisolated static let workspaceGitMetadataSnapshotCacheLifetime: TimeInterval = 1.0
     private nonisolated static let mergedPullRequestBadgeStaleAfter: TimeInterval = 14 * 24 * 60 * 60
     @Published var selectedTabId: UUID? {
         willSet {
@@ -1013,6 +1014,12 @@ class TabManager: ObservableObject {
     private var workspaceGitProbeStateByKey: [WorkspaceGitProbeKey: WorkspaceGitProbeState] = [:]
     private var workspaceGitProbeTimersByKey: [WorkspaceGitProbeKey: [DispatchSourceTimer]] = [:]
     private var workspaceGitTrackedDirectoryByKey: [WorkspaceGitProbeKey: String] = [:]
+    private var workspaceGitMetadataSnapshotTasksByDirectory: [
+        String: Task<InitialWorkspaceGitMetadataSnapshot, Never>
+    ] = [:]
+    private var workspaceGitMetadataSnapshotCacheByDirectory: [
+        String: (capturedAt: Date, snapshot: InitialWorkspaceGitMetadataSnapshot)
+    ] = [:]
     private var workspacePullRequestProbeStateByKey: [WorkspaceGitProbeKey: WorkspaceGitProbeState] = [:]
     private var workspacePullRequestNextPollAtByKey: [WorkspaceGitProbeKey: Date] = [:]
     private var workspacePullRequestLastTerminalStateRefreshAtByKey: [WorkspaceGitProbeKey: Date] = [:]
@@ -1113,6 +1120,9 @@ class TabManager: ObservableObject {
         selectedWorkspaceGitMetadataPollTimer?.cancel()
         workspacePullRequestPollTimer?.cancel()
         workspacePullRequestRefreshTask?.cancel()
+        for task in workspaceGitMetadataSnapshotTasksByDirectory.values {
+            task.cancel()
+        }
     }
 
     // MARK: - Agent PID Sweep
@@ -2347,8 +2357,9 @@ class TabManager: ObservableObject {
             return
         }
 
+        let snapshotTask = workspaceGitMetadataSnapshotTask(for: expectedDirectory)
         Task.detached(priority: .utility) { [weak self] in
-            let snapshot = await Self.initialWorkspaceGitMetadataSnapshot(for: expectedDirectory)
+            let snapshot = await snapshotTask.value
             guard !Task.isCancelled else { return }
             await MainActor.run { [weak self] in
                 self?.applyWorkspaceGitMetadataSnapshot(
@@ -2358,6 +2369,46 @@ class TabManager: ObservableObject {
                     isLastAttempt: isLastAttempt
                 )
             }
+        }
+    }
+
+    private func workspaceGitMetadataSnapshotTask(
+        for directory: String
+    ) -> Task<InitialWorkspaceGitMetadataSnapshot, Never> {
+        let now = Date()
+        pruneWorkspaceGitMetadataSnapshotCache(now: now)
+        if let cached = workspaceGitMetadataSnapshotCacheByDirectory[directory],
+           now.timeIntervalSince(cached.capturedAt) < Self.workspaceGitMetadataSnapshotCacheLifetime {
+            return Task {
+                cached.snapshot
+            }
+        }
+
+        if let task = workspaceGitMetadataSnapshotTasksByDirectory[directory] {
+            return task
+        }
+
+#if DEBUG
+        cmuxDebugLog("workspace.gitProbe.snapshot.start dir=\(directory)")
+#endif
+        let task = Task.detached(priority: .utility) {
+            await Self.initialWorkspaceGitMetadataSnapshot(for: directory)
+        }
+        workspaceGitMetadataSnapshotTasksByDirectory[directory] = task
+        Task { @MainActor [weak self] in
+            let snapshot = await task.value
+            let capturedAt = Date()
+            self?.workspaceGitMetadataSnapshotTasksByDirectory.removeValue(forKey: directory)
+            self?.workspaceGitMetadataSnapshotCacheByDirectory[directory] = (capturedAt, snapshot)
+            self?.pruneWorkspaceGitMetadataSnapshotCache(now: capturedAt)
+        }
+        return task
+    }
+
+    private func pruneWorkspaceGitMetadataSnapshotCache(now: Date) {
+        let lifetime = Self.workspaceGitMetadataSnapshotCacheLifetime
+        workspaceGitMetadataSnapshotCacheByDirectory = workspaceGitMetadataSnapshotCacheByDirectory.filter {
+            now.timeIntervalSince($0.value.capturedAt) < lifetime
         }
     }
 
