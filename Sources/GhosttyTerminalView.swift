@@ -4679,6 +4679,33 @@ final class TerminalSurface: Identifiable, ObservableObject {
         return surface
     }
 
+    func runtimeSurfaceForGhosttyCall(reason: String) -> ghostty_surface_t? {
+        guard let surface else { return nil }
+        guard runtimeSurfaceIsRegisteredAndLive(surface, reason: reason) else { return nil }
+        return surface
+    }
+
+    private func runtimeSurfaceIsRegisteredAndLive(_ surface: ghostty_surface_t, reason: String) -> Bool {
+        let registeredOwnerId = TerminalSurfaceRegistry.shared.runtimeSurfaceOwnerId(surface)
+        guard hasLiveSurface,
+              self.surface == surface,
+              registeredOwnerId == id,
+              cmuxSurfacePointerAppearsLive(surface) else {
+            if self.surface == surface {
+                quarantineStaleRuntimeSurface(surface, reason: reason)
+            }
+#if DEBUG
+            let registeredOwnerToken = registeredOwnerId.map { String($0.uuidString.prefix(5)) } ?? "nil"
+            cmuxDebugLog(
+                "surface.access.drop surface=\(id.uuidString.prefix(8)) reason=\(reason) " +
+                "registryOwner=\(registeredOwnerToken) staleSurface=1"
+            )
+#endif
+            return false
+        }
+        return true
+    }
+
     private static let portalHostAreaThreshold: CGFloat = 4
 
     private static func portalHostArea(for bounds: CGRect) -> CGFloat {
@@ -5001,7 +5028,7 @@ final class TerminalSurface: Identifiable, ObservableObject {
             if let screen = view.window?.screen ?? NSScreen.main,
                let displayID = screen.displayID,
                displayID != 0,
-               let s = surface {
+               let s = runtimeSurfaceForGhosttyCall(reason: "attachToView.reuse.displayId") {
                 ghostty_surface_set_display_id(s, displayID)
             }
             return
@@ -5050,7 +5077,7 @@ final class TerminalSurface: Identifiable, ObservableObject {
         } else if let screen = view.window?.screen ?? NSScreen.main,
                   let displayID = screen.displayID,
                   displayID != 0,
-                  let s = surface {
+                  let s = runtimeSurfaceForGhosttyCall(reason: "attachToView.displayId") {
             // Surface exists but we're (re)attaching after a view hierarchy move; ensure display id.
             ghostty_surface_set_display_id(s, displayID)
 #if DEBUG
@@ -5436,7 +5463,7 @@ final class TerminalSurface: Identifiable, ObservableObject {
         layerScale: CGFloat,
         backingSize: CGSize? = nil
     ) -> Bool {
-        guard let surface = surface else { return false }
+        guard let surface = runtimeSurfaceForGhosttyCall(reason: "updateSize") else { return false }
         _ = layerScale
 
         let resolvedBackingWidth = backingSize?.width ?? (width * xScale)
@@ -5502,16 +5529,15 @@ final class TerminalSurface: Identifiable, ObservableObject {
         cmuxDebugLog("forceRefresh: \(id) reason=\(reason) \(viewState)")
         #endif
         guard let view = attachedView,
-              let surface,
               view.window != nil,
               view.bounds.width > 0,
               view.bounds.height > 0 else {
             return
         }
+        guard let currentSurface = runtimeSurfaceForGhosttyCall(reason: "forceRefresh.displayId") else { return }
 #if DEBUG
         recordDebugForceRefresh()
 #endif
-        guard let currentSurface = self.surface else { return }
 
         // Re-read self.surface before each ghostty call to guard against the surface
         // being freed during wake-from-sleep geometry reconciliation (issue #432).
@@ -5527,8 +5553,8 @@ final class TerminalSurface: Identifiable, ObservableObject {
         }
 
         view.forceRefreshSurface()
-        guard let surface = self.surface else { return }
-        ghostty_surface_refresh(surface)
+        guard let refreshedSurface = runtimeSurfaceForGhosttyCall(reason: "forceRefresh.refresh") else { return }
+        ghostty_surface_refresh(refreshedSurface)
     }
 
     func applyWindowBackgroundIfActive() {
@@ -5549,7 +5575,7 @@ final class TerminalSurface: Identifiable, ObservableObject {
         desiredFocusState = focused
         // Track desired state even before the C surface exists (e.g. during
         // layout restoration). createSurface syncs the state once created.
-        guard let surface = surface else { return }
+        guard let surface = runtimeSurfaceForGhosttyCall(reason: "setFocus") else { return }
         ghostty_surface_set_focus(surface, focused)
 
         // If we focus a surface while it is being rapidly reparented (closing splits, etc),
@@ -5566,7 +5592,7 @@ final class TerminalSurface: Identifiable, ObservableObject {
     }
 
     func setOcclusion(_ visible: Bool) {
-        guard let surface = surface else { return }
+        guard let surface = runtimeSurfaceForGhosttyCall(reason: "setOcclusion") else { return }
         ghostty_surface_set_occlusion(surface, visible)
     }
 
@@ -5576,26 +5602,12 @@ final class TerminalSurface: Identifiable, ObservableObject {
             return needsConfirmCloseOverrideForTesting
         }
 #endif
-        guard let surface = surface else { return false }
+        guard let surface = runtimeSurfaceForGhosttyCall(reason: "needsConfirmClose") else { return false }
         return ghostty_surface_needs_confirm_quit(surface)
     }
 
     func runtimeSurfaceCanAcceptInput(_ surface: ghostty_surface_t, reason: String) -> Bool {
-        let registeredOwnerId = TerminalSurfaceRegistry.shared.runtimeSurfaceOwnerId(surface)
-        guard hasLiveSurface,
-              self.surface == surface,
-              registeredOwnerId == id,
-              cmuxSurfacePointerAppearsLive(surface) else {
-            if self.surface == surface {
-                quarantineStaleRuntimeSurface(surface, reason: reason)
-            }
-#if DEBUG
-            cmuxDebugLog(
-                "surface.input.drop surface=\(id.uuidString.prefix(8)) reason=\(reason) staleSurface=1"
-            )
-#endif
-            return false
-        }
+        guard runtimeSurfaceIsRegisteredAndLive(surface, reason: reason) else { return false }
         guard !ghostty_surface_process_exited(surface) else {
 #if DEBUG
             cmuxDebugLog(
@@ -6015,7 +6027,7 @@ final class TerminalSurface: Identifiable, ObservableObject {
     }
 
     func hasSelection() -> Bool {
-        guard let surface = surface else { return false }
+        guard let surface = runtimeSurfaceForGhosttyCall(reason: "hasSelection") else { return false }
         return ghostty_surface_has_selection(surface)
     }
 
@@ -6558,7 +6570,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
             self?.windowDidChangeScreen(notification)
         }
 
-        if let surface = terminalSurface?.surface,
+        if let surface = terminalSurface?.runtimeSurfaceForGhosttyCall(reason: "viewDidMoveToWindow.displayId"),
            let displayID = window.screen?.displayID,
            displayID != 0 {
             ghostty_surface_set_display_id(surface, displayID)
@@ -6857,8 +6869,14 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         terminalSurface?.surface
     }
 
+    private func ghosttyEventSurface(reason: String) -> ghostty_surface_t? {
+        guard let surface else { return nil }
+        guard terminalSurface?.runtimeSurfaceCanAcceptInput(surface, reason: reason) == true else { return nil }
+        return surface
+    }
+
     private func applySurfaceColorScheme(force: Bool = false) {
-        guard let surface else { return }
+        guard let surface = terminalSurface?.runtimeSurfaceForGhosttyCall(reason: "applySurfaceColorScheme") else { return }
         let bestMatch = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua])
         let scheme: ghostty_color_scheme_e = bestMatch == .darkAqua
             ? GHOSTTY_COLOR_SCHEME_DARK
@@ -6885,12 +6903,19 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     @discardableResult
     private func ensureSurfaceReadyForInput() -> ghostty_surface_t? {
         if let surface = surface {
-            return surface
+            if terminalSurface?.runtimeSurfaceCanAcceptInput(surface, reason: "ensureSurfaceReadyForInput") == true {
+                return surface
+            }
+            return nil
         }
         guard window != nil else { return nil }
         terminalSurface?.attachToView(self)
         updateSurfaceSize(size: bounds.size)
         applySurfaceColorScheme(force: true)
+        guard let surface else { return nil }
+        guard terminalSurface?.runtimeSurfaceCanAcceptInput(surface, reason: "ensureSurfaceReadyForInput.created") == true else {
+            return nil
+        }
         return surface
     }
 
@@ -6914,10 +6939,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     }
 
     func performBindingAction(_ action: String) -> Bool {
-        guard let surface = surface else { return false }
-        guard terminalSurface?.runtimeSurfaceCanAcceptInput(surface, reason: "view.bindingAction") == true else {
-            return false
-        }
+        guard let surface = ghosttyEventSurface(reason: "view.bindingAction") else { return false }
         let handled = action.withCString { cString in
             ghostty_surface_binding_action(surface, cString, UInt(strlen(cString)))
         }
@@ -7180,7 +7202,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
         switch item.action {
         case #selector(copy(_:)):
-            guard let surface = surface else { return false }
+            guard let surface = terminalSurface?.runtimeSurfaceForGhosttyCall(reason: "validateCopy") else { return false }
             return ghostty_surface_has_selection(surface)
         case #selector(paste(_:)):
             return GhosttyPasteboardHelper.hasString(for: GHOSTTY_CLIPBOARD_STANDARD)
@@ -7402,7 +7424,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
             desiredFocus = false
             terminalSurface?.recordExternalFocusState(false)
         }
-        if result, let surface = surface {
+        if result, let surface = ghosttyEventSurface(reason: "resignFirstResponder") {
             let now = CACurrentMediaTime()
             let deltaMs = (now - lastScrollEventTime) * 1000
             Self.focusLog("resignFirstResponder: surface=\(terminalSurface?.id.uuidString ?? "nil") deltaSinceScrollMs=\(String(format: "%.2f", deltaMs))")
@@ -8130,7 +8152,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     }
 
     override func flagsChanged(with event: NSEvent) {
-        guard let surface = surface else {
+        guard let surface = ghosttyEventSurface(reason: "flagsChanged") else {
             super.flagsChanged(with: event)
             return
         }
@@ -8476,7 +8498,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
                 surfaceId: terminalSurface.id
             )
         }
-        guard let surface = surface else { return }
+        guard let surface = ghosttyEventSurface(reason: "mouseDown") else { return }
         let eventPoint = convert(event.locationInWindow, from: nil)
         trackMousePointIfUsable(eventPoint)
         // Only update mouse position on the first click to prevent unwanted cursor
@@ -8491,7 +8513,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         #if DEBUG
         cmuxDebugLog("terminal.mouseUp surface=\(terminalSurface?.id.uuidString.prefix(5) ?? "nil") mods=[\(debugModifierString(event.modifierFlags))]")
         #endif
-        guard let surface = surface else { return }
+        guard let surface = ghosttyEventSurface(reason: "mouseUp") else { return }
         let point = convert(event.locationInWindow, from: nil)
         let consumed = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, modsFromEvent(event))
         _ = handleCommandClickRelease(at: point, modifierFlags: event.modifierFlags, ghosttyConsumed: consumed)
@@ -8516,7 +8538,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     }
 
     private func resolveWordUnderCursorPath(at point: NSPoint? = nil) -> WordPathResolution? {
-        guard let surface = surface else { return nil }
+        guard let surface = terminalSurface?.runtimeSurfaceForGhosttyCall(reason: "resolveWordUnderCursor") else { return nil }
 
         guard let termSurface = terminalSurface,
               let workspace = termSurface.owningWorkspace(),
@@ -9078,7 +9100,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
 #endif
 
     override func rightMouseDown(with event: NSEvent) {
-        guard let surface = surface else { return }
+        guard let surface = ghosttyEventSurface(reason: "rightMouseDown") else { return }
         if !ghostty_surface_mouse_captured(surface) {
             requestPointerFocusRecovery()
             super.rightMouseDown(with: event)
@@ -9093,7 +9115,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     }
 
     override func rightMouseUp(with event: NSEvent) {
-        guard let surface = surface else { return }
+        guard let surface = ghosttyEventSurface(reason: "rightMouseUp") else { return }
         if !ghostty_surface_mouse_captured(surface) {
             super.rightMouseUp(with: event)
             return
@@ -9109,7 +9131,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         }
         requestPointerFocusRecovery()
         window?.makeFirstResponder(self)
-        guard let surface = surface else { return }
+        guard let surface = ghosttyEventSurface(reason: "otherMouseDown") else { return }
         let point = convert(event.locationInWindow, from: nil)
         ghostty_surface_mouse_pos(surface, point.x, bounds.height - point.y, modsFromEvent(event))
         _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_MIDDLE, modsFromEvent(event))
@@ -9120,12 +9142,12 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
             super.otherMouseUp(with: event)
             return
         }
-        guard let surface = surface else { return }
+        guard let surface = ghosttyEventSurface(reason: "otherMouseUp") else { return }
         _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_MIDDLE, modsFromEvent(event))
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
-        guard let surface = surface else { return nil }
+        guard let surface = ghosttyEventSurface(reason: "contextMenu") else { return nil }
         if ghostty_surface_mouse_captured(surface) {
             return nil
         }
@@ -9246,7 +9268,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
 
     override func mouseMoved(with event: NSEvent) {
         maybeRequestFirstResponderForMouseFocus()
-        guard let surface = surface else { return }
+        guard let surface = ghosttyEventSurface(reason: "mouseMoved") else { return }
         let suppressCommandPathHover = shouldSuppressCommandPathHover(for: event.modifierFlags)
         let eventPoint = convert(event.locationInWindow, from: nil)
         trackMousePointIfUsable(eventPoint)
@@ -9269,7 +9291,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     override func mouseEntered(with event: NSEvent) {
         super.mouseEntered(with: event)
         maybeRequestFirstResponderForMouseFocus()
-        guard let surface = surface else { return }
+        guard let surface = ghosttyEventSurface(reason: "mouseEntered") else { return }
         let suppressCommandPathHover = shouldSuppressCommandPathHover(for: event.modifierFlags)
         let eventPoint = convert(event.locationInWindow, from: nil)
         trackMousePointIfUsable(eventPoint)
@@ -9311,7 +9333,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
             wordPathHoverActive = false
             NSCursor.pop()
         }
-        guard let surface = surface else { return }
+        guard let surface = ghosttyEventSurface(reason: "mouseExited") else { return }
         if NSEvent.pressedMouseButtons != 0 {
             return
         }
@@ -9319,7 +9341,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let surface = surface else { return }
+        guard let surface = ghosttyEventSurface(reason: "mouseDragged") else { return }
         let eventPoint = convert(event.locationInWindow, from: nil)
         trackMousePointIfUsable(eventPoint)
         // Forward the raw drag coordinates, including out-of-bounds positions.
@@ -9330,7 +9352,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
 
     override func scrollWheel(with event: NSEvent) {
         NotificationCenter.default.post(name: .ghosttyDidReceiveWheelScroll, object: self)
-        guard let surface = surface else { return }
+        guard let surface = ghosttyEventSurface(reason: "scrollWheel") else { return }
         lastScrollEventTime = CACurrentMediaTime()
         Self.focusLog("scrollWheel: surface=\(terminalSurface?.id.uuidString ?? "nil") firstResponder=\(String(describing: window?.firstResponder))")
         var x = event.scrollingDeltaX
@@ -9430,7 +9452,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         guard let window else { return }
         guard let object = notification.object as? NSWindow, window == object else { return }
         guard let screen = window.screen else { return }
-        guard let surface = terminalSurface?.surface else { return }
+        guard let surface = terminalSurface?.runtimeSurfaceForGhosttyCall(reason: "windowDidChangeScreen") else { return }
 
         if let displayID = screen.displayID,
            displayID != 0 {
@@ -12983,12 +13005,7 @@ extension GhosttyNSView: NSTextInputClient {
     /// execution, etc.). Programmatic callers can preserve literal ESC bytes so
     /// automation payloads remain byte-for-byte stable.
     fileprivate func sendTextToSurface(_ chars: String, preserveLiteralEscape: Bool) {
-        guard let surface = surface else { return }
-        let canAcceptInput = terminalSurface?.runtimeSurfaceCanAcceptInput(
-            surface,
-            reason: "insertText"
-        ) ?? !ghostty_surface_process_exited(surface)
-        guard canAcceptInput else { return }
+        guard let surface = ghosttyEventSurface(reason: "insertText") else { return }
 #if DEBUG
         let typingTimingStart = CmuxTypingTiming.start()
 #endif
@@ -13264,7 +13281,7 @@ extension GhosttyNSView: NSTextInputClient {
             )
         }
 #endif
-        guard let surface = surface else { return }
+        guard let surface = ghosttyEventSurface(reason: "syncPreedit") else { return }
 
         if markedText.length > 0 {
             let str = markedText.string
@@ -13324,7 +13341,7 @@ extension GhosttyNSView: NSTextInputClient {
             y = override.y
             w = override.width
             h = override.height
-        } else if let surface = surface {
+        } else if let surface = terminalSurface?.runtimeSurfaceForGhosttyCall(reason: "firstRect.imePoint") {
             ghostty_surface_ime_point(surface, &x, &y, &w, &h)
         }
 #else
@@ -13333,7 +13350,7 @@ extension GhosttyNSView: NSTextInputClient {
            let snapshot = readSelectionSnapshot() {
             x = snapshot.topLeft.x - 2
             y = snapshot.topLeft.y + 2
-        } else if let surface = surface {
+        } else if let surface = terminalSurface?.runtimeSurfaceForGhosttyCall(reason: "firstRect.imePoint") {
             ghostty_surface_ime_point(surface, &x, &y, &w, &h)
         }
 #endif
