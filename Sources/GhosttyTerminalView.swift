@@ -4393,6 +4393,15 @@ final class TerminalSurface: Identifiable, ObservableObject {
         }
     }
 
+    private struct PendingSearchResize {
+        let width: CGFloat
+        let height: CGFloat
+        let xScale: CGFloat
+        let yScale: CGFloat
+        let layerScale: CGFloat
+        let backingSize: CGSize?
+    }
+
     private(set) var surface: ghostty_surface_t?
     private weak var attachedView: GhosttyNSView?
 
@@ -4450,6 +4459,8 @@ final class TerminalSurface: Identifiable, ObservableObject {
     private var pendingSocketInputBytes: Int = 0
     private let maxPendingSocketInputBytes = 1_048_576
     private var backgroundSurfaceStartQueued = false
+    private var pendingSearchResize: PendingSearchResize?
+    private var pendingSearchResizeQueued = false
     private var surfaceCallbackContext: Unmanaged<GhosttySurfaceCallbackContext>?
     /// The desired focus state for the Ghostty C surface. May be set before the
     /// C surface exists (e.g. during layout restoration); `createSurface`
@@ -5454,6 +5465,25 @@ final class TerminalSurface: Identifiable, ObservableObject {
 #endif
     }
 
+    private func schedulePendingSearchResizeIfNeeded() {
+        guard !pendingSearchResizeQueued else { return }
+        pendingSearchResizeQueued = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.pendingSearchResizeQueued = false
+            guard let pending = self.pendingSearchResize else { return }
+            self.pendingSearchResize = nil
+            _ = self.updateSize(
+                width: pending.width,
+                height: pending.height,
+                xScale: pending.xScale,
+                yScale: pending.yScale,
+                layerScale: pending.layerScale,
+                backingSize: pending.backingSize
+            )
+        }
+    }
+
     @discardableResult
     func updateSize(
         width: CGFloat,
@@ -5495,14 +5525,27 @@ final class TerminalSurface: Identifiable, ObservableObject {
         }
 
         if sizeChanged {
-            if searchState != nil {
+            if searchState != nil || pendingSearchResize != nil {
 #if DEBUG
                 cmuxDebugLog(
-                    "find.searchState clearedForResize tab=\(tabId.uuidString.prefix(5)) " +
-                    "surface=\(id.uuidString.prefix(5)) size=\(wpx)x\(hpx)"
+                    "find.searchState deferResize tab=\(tabId.uuidString.prefix(5)) " +
+                    "surface=\(id.uuidString.prefix(5)) size=\(wpx)x\(hpx) " +
+                    "searchActive=\(searchState != nil ? 1 : 0)"
                 )
 #endif
-                searchState = nil
+                pendingSearchResize = PendingSearchResize(
+                    width: width,
+                    height: height,
+                    xScale: xScale,
+                    yScale: yScale,
+                    layerScale: layerScale,
+                    backingSize: backingSize
+                )
+                if searchState != nil {
+                    searchState = nil
+                }
+                schedulePendingSearchResizeIfNeeded()
+                return true
             }
             ghostty_surface_set_size(surface, wpx, hpx)
             lastPixelWidth = wpx
