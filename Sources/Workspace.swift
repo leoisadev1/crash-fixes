@@ -11621,14 +11621,15 @@ final class Workspace: Identifiable, ObservableObject {
 
     // MARK: - Portal Lifecycle
 
-    /// Hide all terminal portal views for this workspace.
+    /// Detach all terminal portal views for this workspace.
     /// Called before the workspace is unmounted to prevent portal-hosted terminal
-    /// views from covering browser panes in the newly selected workspace.
+    /// views from covering the newly selected workspace and to release offscreen
+    /// AppKit/layer resources while the terminal surface object stays alive.
     func hideAllTerminalPortalViews() {
         for panel in panels.values {
             guard let terminal = panel as? TerminalPanel else { continue }
             terminal.hostedView.setVisibleInUI(false)
-            TerminalWindowPortalRegistry.hideHostedView(terminal.hostedView)
+            TerminalWindowPortalRegistry.detach(hostedView: terminal.hostedView)
         }
     }
 
