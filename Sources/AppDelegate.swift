@@ -872,6 +872,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var didBootstrapInitialMainWindow = false
     private var isTerminatingApp = false
     private var isTerminatingDuplicateInstance = false
+    private var didPersistTerminatingSessionSnapshotWithScrollback = false
     // Set to true when the user has already confirmed quit via the warning dialog,
     // so applicationShouldTerminate does not show a second alert.
     private var isQuitWarningConfirmed = false
@@ -1496,7 +1497,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             closeAllWebInspectorsBeforeAppTeardown()
             return .terminateNow
         }
-        _ = saveSessionSnapshot(includeScrollback: true, removeWhenEmpty: false)
+        _ = saveTerminatingSessionSnapshotWithScrollback(source: "applicationShouldTerminate")
 
         // Tagged DEV builds are ephemeral, skip quit confirmation entirely.
         if SocketControlSettings.isTaggedDevBuild() {
@@ -1542,6 +1543,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             } else {
                 // Reset so that the next quit attempt can show the dialog again.
                 self.isTerminatingApp = false
+                self.didPersistTerminatingSessionSnapshotWithScrollback = false
             }
             NSApp.reply(toApplicationShouldTerminate: shouldQuit)
         }
@@ -1557,7 +1559,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         isTerminatingApp = true
         closeAllWebInspectorsBeforeAppTeardown()
         if !isTerminatingDuplicateInstance {
-            _ = saveSessionSnapshot(includeScrollback: true, removeWhenEmpty: false)
+            _ = saveTerminatingSessionSnapshotWithScrollback(source: "applicationWillTerminate")
         }
         stopSessionAutosaveTimer()
         CloudVMActionLauncher.shared.terminateAll()
@@ -1581,7 +1583,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func persistSessionForUpdateRelaunch() {
         isTerminatingApp = true
-        _ = saveSessionSnapshot(includeScrollback: true, removeWhenEmpty: false)
+        _ = saveTerminatingSessionSnapshotWithScrollback(source: "updateRelaunch")
     }
 
     func configure(tabManager: TabManager, notificationStore: TerminalNotificationStore, sidebarState: SidebarState) {
@@ -3170,7 +3172,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.isTerminatingApp = true
-                _ = self.saveSessionSnapshot(includeScrollback: true, removeWhenEmpty: false)
+                _ = self.saveTerminatingSessionSnapshotWithScrollback(source: "workspace.willPowerOff")
             }
         }
         lifecycleSnapshotObservers.append(powerOffObserver)
@@ -3183,7 +3185,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 if self.isTerminatingApp {
-                    _ = self.saveSessionSnapshot(includeScrollback: true, removeWhenEmpty: false)
+                    _ = self.saveTerminatingSessionSnapshotWithScrollback(source: "workspace.sessionDidResignActive")
                 } else {
                     _ = self.saveSessionSnapshot(includeScrollback: false)
                 }
@@ -3621,6 +3623,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         guard !isTerminatingApp, !includeScrollback else { return }
         lastSessionAutosaveFingerprint = fingerprint
         lastSessionAutosavePersistedAt = persistedAt
+    }
+
+    @discardableResult
+    private func saveTerminatingSessionSnapshotWithScrollback(source: String) -> Bool {
+        guard Self.shouldPersistTerminatingScrollbackSnapshot(
+            alreadyPersisted: didPersistTerminatingSessionSnapshotWithScrollback
+        ) else {
+#if DEBUG
+            cmuxDebugLog(
+                "session.save.skipped reason=terminating_scrollback_already_persisted includeScrollback=1 source=\(source)"
+            )
+#endif
+            return false
+        }
+
+        let saved = saveSessionSnapshot(includeScrollback: true, removeWhenEmpty: false)
+        if saved {
+            didPersistTerminatingSessionSnapshotWithScrollback = true
+        }
+        return saved
+    }
+
+    nonisolated static func shouldPersistTerminatingScrollbackSnapshot(
+        alreadyPersisted: Bool
+    ) -> Bool {
+        !alreadyPersisted
     }
 
     private nonisolated static func hashFrame(_ frame: NSRect, into hasher: inout Hasher) {

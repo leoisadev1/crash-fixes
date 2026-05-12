@@ -553,6 +553,15 @@ final class SessionPersistenceTests: XCTestCase {
         )
     }
 
+    func testTerminatingScrollbackSnapshotPolicySkipsAfterSuccessfulFullSave() {
+        XCTAssertTrue(
+            AppDelegate.shouldPersistTerminatingScrollbackSnapshot(alreadyPersisted: false)
+        )
+        XCTAssertFalse(
+            AppDelegate.shouldPersistTerminatingScrollbackSnapshot(alreadyPersisted: true)
+        )
+    }
+
     func testRestoreCompletionSavePolicySkipsManualReopen() {
         XCTAssertTrue(
             AppDelegate.shouldSaveSessionSnapshotOnRestoreCompletion(
