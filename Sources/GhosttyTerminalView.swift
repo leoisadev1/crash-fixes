@@ -13783,6 +13783,20 @@ struct GhosttyTerminalView: NSViewRepresentable {
         coordinator.attachGeneration += 1
         let generation = coordinator.attachGeneration
 
+        if !isVisibleInUI {
+            if let host = hostContainer {
+                host.onDidMoveToWindow = nil
+                host.onGeometryChanged = nil
+            }
+            hostedView.setDropZoneOverlay(zone: nil)
+            hostedView.setVisibleInUI(false)
+            hostedView.setActive(false)
+            TerminalWindowPortalRegistry.detach(hostedView: hostedView)
+            coordinator.lastBoundHostId = nil
+            coordinator.lastSynchronizedHostGeometryRevision = 0
+            return
+        }
+
         if let host = hostContainer {
             host.onDidMoveToWindow = { [weak host, weak hostedView, weak coordinator] in
                 guard let host, let hostedView, let coordinator else { return }

@@ -12297,10 +12297,14 @@ final class Workspace: Identifiable, ObservableObject {
                 terminalPanel.hostedView.setActive(shouldBeActive)
                 didChange = true
             }
-            TerminalWindowPortalRegistry.updateEntryVisibility(
-                for: terminalPanel.hostedView,
-                visibleInUI: shouldBeVisible
-            )
+            if shouldBeVisible {
+                TerminalWindowPortalRegistry.updateEntryVisibility(
+                    for: terminalPanel.hostedView,
+                    visibleInUI: true
+                )
+            } else {
+                TerminalWindowPortalRegistry.detach(hostedView: terminalPanel.hostedView)
+            }
         }
 
         return didChange
