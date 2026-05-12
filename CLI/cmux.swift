@@ -2650,6 +2650,36 @@ struct CMUXCLI {
                 let forwardedArgs = request["command_args"] as? [String] ?? []
                 let rawInput = request["raw_input"] as? String ?? ""
                 let callerParentPID = intFromAny(request["caller_ppid"]).flatMap { $0 > 1 ? $0 : nil }
+
+                if agentName == "claude",
+                   forwardedArgs.first?.lowercased() == "pre-tool-use" {
+                    workerQueue.async {
+                        do {
+                            _ = try self.withHotPathEnvironment(requestEnv) {
+                                try self.capturePrintedOutput {
+                                    let telemetry = CLISocketSentryTelemetry(
+                                        command: "__hot-path-hook",
+                                        commandArgs: [agentName] + forwardedArgs,
+                                        socketPath: socketPath,
+                                        processEnv: requestEnv
+                                    )
+                                    try withHotClient { client in
+                                        try self.runClaudeHook(
+                                            commandArgs: forwardedArgs,
+                                            client: client,
+                                            telemetry: telemetry,
+                                            rawInput: rawInput,
+                                            processEnv: requestEnv,
+                                            callerParentPID: callerParentPID
+                                        )
+                                    }
+                                }
+                            }
+                        } catch {}
+                    }
+                    return ["ok": true, "stdout": "OK\n"]
+                }
+
                 let output = try performWorkerSync {
                     try self.withHotPathEnvironment(requestEnv) {
                         try self.capturePrintedOutput {

@@ -62,6 +62,43 @@ def run_hot_path_rpc(
     )
 
 
+def run_hot_path_claude_pre_tool_use(
+    cli_path: str,
+    app_socket: str,
+    broker_socket: str,
+    env: dict[str, str],
+    timeout: float = 2.0,
+) -> subprocess.CompletedProcess[str]:
+    payload = json.dumps(
+        {
+            "session_id": "hot-path-pre-tool-use",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Read",
+            "tool_input": {"file_path": "README.md"},
+        }
+    )
+    return subprocess.run(
+        [
+            cli_path,
+            "--socket",
+            app_socket,
+            "__hot-path",
+            "--broker-socket",
+            broker_socket,
+            "hook",
+            "claude",
+            "pre-tool-use",
+        ],
+        input=payload,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        timeout=timeout,
+        check=False,
+    )
+
+
 class FakeJSONRPCSocketServer:
     def __init__(self, socket_path: str, response_delay: float) -> None:
         self.socket_path = socket_path
@@ -128,7 +165,16 @@ class FakeJSONRPCSocketServer:
                     line = raw_line.strip()
                     if not line:
                         continue
-                    request = json.loads(line.decode("utf-8"))
+                    decoded = line.decode("utf-8")
+                    try:
+                        request = json.loads(decoded)
+                    except json.JSONDecodeError:
+                        with self._lock:
+                            self.methods.append(decoded.split(" ", 1)[0])
+                        if self.response_delay > 0:
+                            time.sleep(self.response_delay)
+                        conn.sendall(b"OK\n")
+                        continue
                     with self._lock:
                         self.methods.append(str(request.get("method", "")))
                     if self.response_delay > 0:
@@ -262,6 +308,46 @@ def main() -> int:
                         )
                 finally:
                     stalled_client.close()
+
+            slow_app_socket = str(root / "slow.sock")
+            slow_broker_socket = str(root / "slow-broker.sock")
+            slow_server = FakeJSONRPCSocketServer(socket_path=slow_app_socket, response_delay=0.6)
+            slow_server.start()
+            try:
+                hook_env = {
+                    **os.environ,
+                    "CMUX_WORKSPACE_ID": "11111111-1111-1111-1111-111111111111",
+                    "CMUX_SURFACE_ID": "22222222-2222-2222-2222-222222222222",
+                    "CMUX_HOT_PATH_BROKER_IDLE_TIMEOUT_SECONDS": "1",
+                }
+                start = time.monotonic()
+                hook_proc = run_hot_path_claude_pre_tool_use(
+                    cli_path,
+                    slow_app_socket,
+                    slow_broker_socket,
+                    hook_env,
+                    timeout=2.0,
+                )
+                elapsed = time.monotonic() - start
+                if hook_proc.returncode != 0:
+                    failures.append(
+                        "claude pre-tool-use hot-path hook failed: "
+                        f"stderr={hook_proc.stderr!r}"
+                    )
+                if hook_proc.stdout.strip() != "OK":
+                    failures.append(
+                        "claude pre-tool-use hot-path hook should return OK immediately, "
+                        f"got stdout={hook_proc.stdout!r}"
+                    )
+                if elapsed > 1.5:
+                    failures.append(
+                        "claude pre-tool-use hot-path hook waited for slow app socket work: "
+                        f"elapsed={elapsed:.2f}s"
+                    )
+            except subprocess.TimeoutExpired:
+                failures.append("claude pre-tool-use hot-path hook timed out instead of returning immediately")
+            finally:
+                slow_server.stop()
         finally:
             server.stop()
 
