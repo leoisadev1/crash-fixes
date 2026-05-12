@@ -7566,10 +7566,27 @@ extension TabManager {
         let restorableTabs = tabs
             .filter(\.isRestorableInSessionSnapshot)
             .prefix(SessionPersistencePolicy.maxWorkspacesPerWindow)
+        let terminalPanelCount = restorableTabs.reduce(into: 0) { count, workspace in
+            count += workspace.panels.values.reduce(into: 0) { workspaceCount, panel in
+                if panel is TerminalPanel {
+                    workspaceCount += 1
+                }
+            }
+        }
+        let preferPlainTextScrollbackCapture = includeScrollback &&
+            SessionPersistencePolicy.shouldPreferPlainTextScrollbackCapture(terminalCount: terminalPanelCount)
+#if DEBUG
+        if preferPlainTextScrollbackCapture {
+            cmuxDebugLog(
+                "session.snapshot.scrollback.mode mode=plainText terminals=\(terminalPanelCount) workspaces=\(restorableTabs.count)"
+            )
+        }
+#endif
         let workspaceSnapshots = restorableTabs
             .map {
                 $0.sessionSnapshot(
                     includeScrollback: includeScrollback,
+                    preferPlainTextScrollbackCapture: preferPlainTextScrollbackCapture,
                     restorableAgentIndex: restorableAgentIndex
                 )
             }

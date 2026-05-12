@@ -19,6 +19,11 @@ enum SessionPersistencePolicy {
     static let maxPanelsPerWorkspace: Int = 512
     static let maxScrollbackLinesPerTerminal: Int = 4000
     static let maxScrollbackCharactersPerTerminal: Int = 400_000
+    static let plainTextScrollbackCaptureTerminalThreshold: Int = 64
+
+    static func shouldPreferPlainTextScrollbackCapture(terminalCount: Int) -> Bool {
+        terminalCount >= plainTextScrollbackCaptureTerminalThreshold
+    }
 
     static func sanitizedSidebarWidth(_ candidate: Double?) -> Double {
         let fallback = defaultSidebarWidth

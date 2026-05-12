@@ -162,6 +162,7 @@ extension Workspace {
 
     func sessionSnapshot(
         includeScrollback: Bool,
+        preferPlainTextScrollbackCapture: Bool = false,
         restorableAgentIndex: RestorableAgentSessionIndex? = nil
     ) -> SessionWorkspaceSnapshot {
         let tree = bonsplitController.treeSnapshot()
@@ -183,6 +184,7 @@ extension Workspace {
                 sessionPanelSnapshot(
                     panelId: panelId,
                     includeScrollback: includeScrollback,
+                    preferPlainTextScrollbackCapture: preferPlainTextScrollbackCapture,
                     restorableAgent: restorableAgentIndex?.snapshot(workspaceId: id, panelId: panelId)
                 )
             }
@@ -374,6 +376,7 @@ extension Workspace {
     private func sessionPanelSnapshot(
         panelId: UUID,
         includeScrollback: Bool,
+        preferPlainTextScrollbackCapture: Bool,
         restorableAgent: SessionRestorableAgentSnapshot?
     ) -> SessionPanelSnapshot? {
         guard let panel = panels[panelId] else { return nil }
@@ -443,10 +446,11 @@ extension Workspace {
             let allowDebugFallbackScrollback = false
 #endif
             let capturedScrollback = includeScrollback && shouldPersistScrollback && !allowDebugFallbackScrollback
-                ? TerminalController.shared.readTerminalTextForSnapshot(
+                ? TerminalController.shared.readTerminalTextForSessionSnapshot(
                     terminalPanel: terminalPanel,
                     includeScrollback: true,
-                    lineLimit: SessionPersistencePolicy.maxScrollbackLinesPerTerminal
+                    lineLimit: SessionPersistencePolicy.maxScrollbackLinesPerTerminal,
+                    preferPlainTextScrollback: preferPlainTextScrollbackCapture
                 )
                 : nil
             let resolvedScrollback = terminalSnapshotScrollback(

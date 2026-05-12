@@ -7766,9 +7766,11 @@ class TerminalController {
     func readTerminalTextForSnapshot(
         terminalPanel: TerminalPanel,
         includeScrollback: Bool = false,
-        lineLimit: Int? = nil
+        lineLimit: Int? = nil,
+        preferPlainTextScrollback: Bool = false
     ) -> String? {
         if includeScrollback,
+           !preferPlainTextScrollback,
            let vtOutput = readTerminalTextFromVTExportForSnapshot(
                terminalPanel: terminalPanel,
                lineLimit: lineLimit
@@ -7796,12 +7798,14 @@ class TerminalController {
     func readTerminalTextForSessionSnapshot(
         terminalPanel: TerminalPanel,
         includeScrollback: Bool = false,
-        lineLimit: Int? = nil
+        lineLimit: Int? = nil,
+        preferPlainTextScrollback: Bool = false
     ) -> String? {
         readTerminalTextForSnapshot(
             terminalPanel: terminalPanel,
             includeScrollback: includeScrollback,
-            lineLimit: lineLimit
+            lineLimit: lineLimit,
+            preferPlainTextScrollback: preferPlainTextScrollback
         )
     }
 

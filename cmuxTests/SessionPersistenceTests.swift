@@ -430,6 +430,26 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertFalse(truncated.hasPrefix("m"))
     }
 
+    func testLargeSessionScrollbackCapturePrefersPlainTextMode() {
+        let threshold = SessionPersistencePolicy.plainTextScrollbackCaptureTerminalThreshold
+
+        XCTAssertFalse(
+            SessionPersistencePolicy.shouldPreferPlainTextScrollbackCapture(
+                terminalCount: threshold - 1
+            )
+        )
+        XCTAssertTrue(
+            SessionPersistencePolicy.shouldPreferPlainTextScrollbackCapture(
+                terminalCount: threshold
+            )
+        )
+        XCTAssertTrue(
+            SessionPersistencePolicy.shouldPreferPlainTextScrollbackCapture(
+                terminalCount: threshold + 1
+            )
+        )
+    }
+
     func testNormalizedExportedScreenPathAcceptsAbsoluteAndFileURL() {
         XCTAssertEqual(
             TerminalController.normalizedExportedScreenPath("/tmp/cmux-screen.txt"),
