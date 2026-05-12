@@ -1015,6 +1015,7 @@ class TabManager: ObservableObject {
     private var workspaceGitProbeStateByKey: [WorkspaceGitProbeKey: WorkspaceGitProbeState] = [:]
     private var workspaceGitProbeTimersByKey: [WorkspaceGitProbeKey: [DispatchSourceTimer]] = [:]
     private var workspaceGitProbeExpectedDirectoryByKey: [WorkspaceGitProbeKey: String] = [:]
+    private var workspaceGitProbeCoalescedPanelIdsByKey: [WorkspaceGitProbeKey: Set<UUID>] = [:]
     private var workspaceGitTrackedDirectoryByKey: [WorkspaceGitProbeKey: String] = [:]
     private var workspaceGitMetadataSnapshotTasksByDirectory: [
         String: Task<InitialWorkspaceGitMetadataSnapshot, Never>
@@ -2356,6 +2357,7 @@ class TabManager: ObservableObject {
     ) {
         let normalizedDirectory = normalizeDirectory(directory)
         let key = WorkspaceGitProbeKey(workspaceId: workspaceId, panelId: panelId)
+        removeCoalescedWorkspaceGitProbePanel(key)
         let targetAlreadyActive = isWorkspaceGitMetadataProbePendingOrInFlight(key)
         if !targetAlreadyActive,
            let existingKey = coalescingWorkspaceGitMetadataProbeKey(
@@ -2363,6 +2365,7 @@ class TabManager: ObservableObject {
             panelId: panelId,
             directory: normalizedDirectory
            ) {
+            workspaceGitProbeCoalescedPanelIdsByKey[existingKey, default: []].insert(panelId)
 #if DEBUG
             cmuxDebugLog(
                 "workspace.gitProbe.skip workspace=\(workspaceId.uuidString.prefix(5)) " +
@@ -2431,6 +2434,16 @@ class TabManager: ObservableObject {
             return true
         }
         return false
+    }
+
+    private func removeCoalescedWorkspaceGitProbePanel(_ key: WorkspaceGitProbeKey) {
+        for sourceKey in Array(workspaceGitProbeCoalescedPanelIdsByKey.keys)
+            where sourceKey.workspaceId == key.workspaceId {
+            workspaceGitProbeCoalescedPanelIdsByKey[sourceKey]?.remove(key.panelId)
+            if workspaceGitProbeCoalescedPanelIdsByKey[sourceKey]?.isEmpty == true {
+                workspaceGitProbeCoalescedPanelIdsByKey.removeValue(forKey: sourceKey)
+            }
+        }
     }
 
     private func beginWorkspaceGitMetadataProbeAttempt(
@@ -2512,6 +2525,8 @@ class TabManager: ObservableObject {
     }
 
     private func clearWorkspaceGitProbe(_ key: WorkspaceGitProbeKey) {
+        removeCoalescedWorkspaceGitProbePanel(key)
+        workspaceGitProbeCoalescedPanelIdsByKey.removeValue(forKey: key)
         workspaceGitProbeStateByKey.removeValue(forKey: key)
         cancelWorkspaceGitProbeTimers(for: key)
         workspaceGitProbeExpectedDirectoryByKey.removeValue(forKey: key)
@@ -2527,6 +2542,9 @@ class TabManager: ObservableObject {
             key.workspaceId != workspaceId
         }
         workspaceGitProbeExpectedDirectoryByKey = workspaceGitProbeExpectedDirectoryByKey.filter { key, _ in
+            key.workspaceId != workspaceId
+        }
+        workspaceGitProbeCoalescedPanelIdsByKey = workspaceGitProbeCoalescedPanelIdsByKey.filter { key, _ in
             key.workspaceId != workspaceId
         }
         clearWorkspacePullRequestTracking(workspaceId: workspaceId)
@@ -2573,6 +2591,7 @@ class TabManager: ObservableObject {
             return
         }
         let matchingPanelIds = workspaceGitMetadataFanoutPanelIds(
+            for: probeKey,
             in: workspace,
             expectedDirectory: expectedDirectory
         )
@@ -2610,12 +2629,16 @@ class TabManager: ObservableObject {
     }
 
     private func workspaceGitMetadataFanoutPanelIds(
+        for probeKey: WorkspaceGitProbeKey,
         in workspace: Workspace,
         expectedDirectory: String
     ) -> [UUID] {
-        workspace.panels.keys
+        var panelIds = Set([probeKey.panelId])
+        panelIds.formUnion(workspaceGitProbeCoalescedPanelIdsByKey[probeKey] ?? [])
+        return panelIds
             .filter { panelId in
-                gitProbeDirectory(for: workspace, panelId: panelId) == expectedDirectory
+                workspace.panels[panelId] != nil
+                    && gitProbeDirectory(for: workspace, panelId: panelId) == expectedDirectory
             }
             .sorted { $0.uuidString < $1.uuidString }
     }
