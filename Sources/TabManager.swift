@@ -2586,6 +2586,10 @@ class TabManager: ObservableObject {
     private func shouldStopWorkspaceGitMetadataRefresh(
         _ snapshot: InitialWorkspaceGitMetadataSnapshot
     ) -> Bool {
+        if snapshot.branch != nil {
+            return true
+        }
+
         switch snapshot.pullRequest {
         case .deferred, .transientFailure:
             return false
