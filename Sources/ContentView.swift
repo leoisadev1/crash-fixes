@@ -3078,7 +3078,7 @@ struct ContentView: View {
             presentFeedbackComposer()
         })
 
-        view = AnyView(view.background(WindowAccessor(dedupeByWindow: false) { window in
+        view = AnyView(view.background(WindowAccessor(dedupeByWindow: false, delivery: .deferred) { window in
             let tmuxOverlayState = tmuxWorkspacePaneWindowOverlayState(for: window)
             tmuxWorkspacePaneWindowOverlayController(for: window, createIfNeeded: tmuxOverlayState != nil)?.update(state: tmuxOverlayState)
             let overlayController = commandPaletteWindowOverlayController(for: window)
@@ -3211,7 +3211,7 @@ struct ContentView: View {
             removeSidebarResizerPointerMonitor()
         })
 
-        view = AnyView(view.background(WindowAccessor(refreshID: appearance.appKitWindowMutationID) { [appearance] window in
+        view = AnyView(view.background(WindowAccessor(refreshID: appearance.appKitWindowMutationID, delivery: .deferred) { [appearance] window in
             window.identifier = NSUserInterfaceItemIdentifier(windowIdentifier)
             window.isRestorable = false
             setMinimalModeSidebarTitlebarControlsAvailable(sidebarState.isVisible, in: window)

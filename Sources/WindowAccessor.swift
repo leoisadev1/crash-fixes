@@ -3,18 +3,26 @@ import SwiftUI
 
 @MainActor
 struct WindowAccessor: NSViewRepresentable {
+    enum Delivery {
+        case immediate
+        case deferred
+    }
+
     let onWindow: @MainActor (NSWindow) -> Void
     let dedupeByWindow: Bool
     let refreshID: AnyHashable?
+    let delivery: Delivery
 
     init(
         dedupeByWindow: Bool = true,
         refreshID: AnyHashable? = nil,
+        delivery: Delivery = .immediate,
         onWindow: @escaping @MainActor (NSWindow) -> Void
     ) {
         self.onWindow = onWindow
         self.dedupeByWindow = dedupeByWindow
         self.refreshID = refreshID
+        self.delivery = delivery
     }
 
     func makeCoordinator() -> Coordinator {
@@ -47,34 +55,55 @@ struct WindowAccessor: NSViewRepresentable {
         let handler = onWindow
         let shouldDedupeByWindow = dedupeByWindow
         let refreshID = refreshID
+        let delivery = delivery
         view.onWindow = { window in
-            guard coordinator.shouldInvoke(
+            coordinator.invoke(
                 window: window,
                 dedupeByWindow: shouldDedupeByWindow,
-                refreshID: refreshID
-            ) else { return }
-            handler(window)
+                refreshID: refreshID,
+                delivery: delivery,
+                handler: handler
+            )
         }
     }
 }
 
 extension WindowAccessor {
+    @MainActor
     final class Coordinator {
         private weak var lastWindow: NSWindow?
         private var lastRefreshID: AnyHashable?
+        private var pendingGeneration: UInt64 = 0
 
-        func shouldInvoke(
+        func invoke(
             window: NSWindow,
             dedupeByWindow: Bool,
-            refreshID: AnyHashable?
-        ) -> Bool {
+            refreshID: AnyHashable?,
+            delivery: Delivery,
+            handler: @escaping @MainActor (NSWindow) -> Void
+        ) {
             if dedupeByWindow, lastWindow === window, lastRefreshID == refreshID {
-                return false
+                return
             }
 
             lastWindow = window
             lastRefreshID = refreshID
-            return true
+
+            switch delivery {
+            case .immediate:
+                handler(window)
+            case .deferred:
+                pendingGeneration &+= 1
+                let generation = pendingGeneration
+                Task { @MainActor [weak self, weak window] in
+                    guard let self,
+                          self.pendingGeneration == generation,
+                          let window else {
+                        return
+                    }
+                    handler(window)
+                }
+            }
         }
     }
 }
