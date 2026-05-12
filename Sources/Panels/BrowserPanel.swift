@@ -6005,10 +6005,16 @@ private extension BrowserPanel {
 
 extension BrowserPanel {
     func hideBrowserPortalView(source: String) {
-        BrowserWindowPortalRegistry.hide(
-            webView: webView,
-            source: source
+        // WKWebView's remote layer can keep compositing after an ancestor is
+        // hidden. Workspace/tab retire paths must remove it from the window
+        // portal; the live WebView object is rebound when the pane is shown.
+        BrowserWindowPortalRegistry.detach(webView: webView)
+#if DEBUG
+        cmuxDebugLog(
+            "browser.portal.detachForHide panel=\(id.uuidString.prefix(5)) " +
+            "source=\(source) web=\(ObjectIdentifier(webView))"
         )
+#endif
     }
 }
 
