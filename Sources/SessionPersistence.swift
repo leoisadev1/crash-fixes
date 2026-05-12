@@ -12,7 +12,7 @@ enum SessionPersistencePolicy {
     static let maximumSidebarWidth: Double = 600
     static let minimumWindowWidth: Double = 300
     static let minimumWindowHeight: Double = 200
-    static let autosaveInterval: TimeInterval = 8.0
+    static let autosaveInterval: TimeInterval = 60.0
     static let autosaveRestorableAgentProcessDetectionInterval: TimeInterval = 60.0
     static let maxWindowsPerSnapshot: Int = 12
     static let maxWorkspacesPerWindow: Int = 128
