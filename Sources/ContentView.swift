@@ -142,6 +142,7 @@ private final class WindowCommandPaletteOverlayController: NSObject {
     private var scheduledFocusWorkItem: DispatchWorkItem?
     private var isPaletteVisible = false
     private var hasMountedPaletteRootView = false
+    private var lastContentFingerprint: Int?
     private var windowDidBecomeKeyObserver: NSObjectProtocol?
     private var windowDidResignKeyObserver: NSObjectProtocol?
 
@@ -549,6 +550,7 @@ private final class WindowCommandPaletteOverlayController: NSObject {
 
     func update(
         isVisible: Bool,
+        contentFingerprint: Int? = nil,
         makeRootView: @MainActor () -> AnyView = { AnyView(EmptyView()) }
     ) {
         let wasVisible = isPaletteVisible
@@ -561,6 +563,13 @@ private final class WindowCommandPaletteOverlayController: NSObject {
             previouslyVisible: wasVisible,
             isVisible: isVisible
         )
+        if isVisible,
+           wasVisible,
+           hasMountedPaletteRootView,
+           !shouldPromote,
+           lastContentFingerprint == contentFingerprint {
+            return
+        }
 #if DEBUG
         if let window {
             cmuxDebugLog(
@@ -576,6 +585,7 @@ private final class WindowCommandPaletteOverlayController: NSObject {
         if isVisible {
             hostingView.rootView = makeRootView()
             hasMountedPaletteRootView = true
+            lastContentFingerprint = contentFingerprint
             containerView.capturesMouseEvents = true
             containerView.isHidden = false
             containerView.alphaValue = 1
@@ -590,6 +600,7 @@ private final class WindowCommandPaletteOverlayController: NSObject {
             }
             hostingView.rootView = AnyView(EmptyView())
             hasMountedPaletteRootView = false
+            lastContentFingerprint = nil
             containerView.capturesMouseEvents = false
             containerView.alphaValue = 0
             containerView.isHidden = true
@@ -1136,6 +1147,23 @@ struct ContentView: View {
         case renameInput(CommandPaletteRenameTarget)
         case renameConfirm(CommandPaletteRenameTarget, proposedName: String)
         case workspaceDescriptionInput(CommandPaletteWorkspaceDescriptionTarget)
+
+        func combineOverlayFingerprint(into hasher: inout Hasher) {
+            switch self {
+            case .commands:
+                hasher.combine("commands")
+            case .renameInput(let target):
+                hasher.combine("renameInput")
+                target.combineOverlayFingerprint(into: &hasher)
+            case .renameConfirm(let target, let proposedName):
+                hasher.combine("renameConfirm")
+                target.combineOverlayFingerprint(into: &hasher)
+                hasher.combine(proposedName)
+            case .workspaceDescriptionInput(let target):
+                hasher.combine("workspaceDescriptionInput")
+                target.combineOverlayFingerprint(into: &hasher)
+            }
+        }
     }
 
     private enum CommandPaletteListScope: String {
@@ -1188,6 +1216,19 @@ struct ContentView: View {
                 return String(localized: "commandPalette.rename.tabPlaceholder", defaultValue: "Tab name")
             }
         }
+
+        func combineOverlayFingerprint(into hasher: inout Hasher) {
+            switch kind {
+            case .workspace(let workspaceId):
+                hasher.combine("workspace")
+                hasher.combine(workspaceId)
+            case .tab(let workspaceId, let panelId):
+                hasher.combine("tab")
+                hasher.combine(workspaceId)
+                hasher.combine(panelId)
+            }
+            hasher.combine(currentName)
+        }
     }
 
     private struct CommandPaletteWorkspaceDescriptionTarget: Equatable {
@@ -1206,6 +1247,11 @@ struct ContentView: View {
                 localized: "commandPalette.description.workspaceInputHint",
                 defaultValue: "Press Enter to save. Press Shift-Enter for a new line, or Escape to cancel."
             )
+        }
+
+        func combineOverlayFingerprint(into hasher: inout Hasher) {
+            hasher.combine(workspaceId)
+            hasher.combine(currentDescription)
         }
     }
 
@@ -3082,7 +3128,10 @@ struct ContentView: View {
             let tmuxOverlayState = tmuxWorkspacePaneWindowOverlayState(for: window)
             tmuxWorkspacePaneWindowOverlayController(for: window, createIfNeeded: tmuxOverlayState != nil)?.update(state: tmuxOverlayState)
             let overlayController = commandPaletteWindowOverlayController(for: window)
-            overlayController.update(isVisible: isCommandPalettePresented) { AnyView(commandPaletteOverlay) }
+            overlayController.update(
+                isVisible: isCommandPalettePresented,
+                contentFingerprint: commandPaletteOverlayContentFingerprint
+            ) { AnyView(commandPaletteOverlay) }
         }))
 
         view = AnyView(view.onChange(of: bgGlassTintHex) { _ in
@@ -3256,7 +3305,10 @@ struct ContentView: View {
                 let tmuxOverlayState = tmuxWorkspacePaneWindowOverlayState(for: window)
                 tmuxWorkspacePaneWindowOverlayController(for: window, createIfNeeded: tmuxOverlayState != nil)?.update(state: tmuxOverlayState)
                 commandPaletteWindowOverlayController(for: window)
-                    .update(isVisible: isCommandPalettePresented) { AnyView(commandPaletteOverlay) }
+                    .update(
+                        isVisible: isCommandPalettePresented,
+                        contentFingerprint: commandPaletteOverlayContentFingerprint
+                    ) { AnyView(commandPaletteOverlay) }
                 TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronize(for: window)
                 BrowserWindowPortalRegistry.scheduleExternalGeometrySynchronize(for: window)
             }
@@ -3670,6 +3722,35 @@ struct ContentView: View {
             cmuxDebugLog("ws.handoff.complete id=none reason=\(reason) retiring=\(debugShortWorkspaceId(retiring))")
         }
 #endif
+    }
+
+    private var commandPaletteOverlayContentFingerprint: Int? {
+        guard isCommandPalettePresented else { return nil }
+
+        var hasher = Hasher()
+        commandPaletteMode.combineOverlayFingerprint(into: &hasher)
+        hasher.combine(commandPaletteQuery)
+        hasher.combine(commandPaletteRenameDraft)
+        hasher.combine(commandPaletteWorkspaceDescriptionDraft)
+        hasher.combine(commandPaletteWorkspaceDescriptionHeight)
+        hasher.combine(commandPaletteSelectedResultIndex)
+        hasher.combine(commandPaletteSelectionAnchorCommandID)
+        hasher.combine(commandPaletteHoveredResultIndex)
+        hasher.combine(commandPaletteScrollTargetIndex)
+        hasher.combine(commandPaletteScrollTargetAnchor?.x)
+        hasher.combine(commandPaletteScrollTargetAnchor?.y)
+        hasher.combine(commandPaletteVisibleResultsScope?.rawValue)
+        hasher.combine(commandPaletteVisibleResultsFingerprint)
+        hasher.combine(commandPaletteResultsRevision)
+        hasher.combine(isCommandPaletteSearchPending)
+        hasher.combine(commandPaletteSearchAllSurfaces)
+        hasher.combine(commandPaletteShouldFocusWorkspaceDescriptionEditor)
+        hasher.combine(isCommandPaletteSearchFocused)
+        hasher.combine(isCommandPaletteRenameFocused)
+        for result in commandPaletteVisibleResults {
+            hasher.combine(result.id)
+        }
+        return hasher.finalize()
     }
 
     private var commandPaletteOverlay: some View {
