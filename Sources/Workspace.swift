@@ -7907,6 +7907,50 @@ final class Workspace: Identifiable, ObservableObject {
     private var skipControlMasterCleanupAfterDetachedRemoteTransfer = false
     var transferredRemoteCleanupConfigurationsByPanelId: [UUID: WorkspaceRemoteConfiguration] = [:]
 
+    func discardClosedSurfaceBookkeeping(panelId: UUID, tabId: TabID?, preservesDetachedSurface: Bool) {
+        if tmuxWorkspaceFlashPanelId == panelId {
+            tmuxWorkspaceFlashPanelId = nil
+        }
+        if pendingRemoteSurfaceTTYSurfaceId == panelId {
+            pendingRemoteSurfaceTTYName = nil
+            pendingRemoteSurfaceTTYSurfaceId = nil
+        }
+        if pendingRemoteSurfacePortKickSurfaceId == panelId {
+            pendingRemoteSurfacePortKickReason = nil
+            pendingRemoteSurfacePortKickSurfaceId = nil
+        }
+        remoteDetectedSurfaceIds.remove(panelId)
+
+        if layoutFollowUpTerminalFocusPanelId == panelId {
+            layoutFollowUpTerminalFocusPanelId = nil
+        }
+        if layoutFollowUpBrowserPanelId == panelId {
+            layoutFollowUpBrowserPanelId = nil
+        }
+        if layoutFollowUpBrowserExitFocusPanelId == panelId {
+            layoutFollowUpBrowserExitFocusPanelId = nil
+        }
+
+        pendingPaneClosePanelIds = pendingPaneClosePanelIds.compactMapValues { panelIds in
+            let remaining = panelIds.filter { $0 != panelId }
+            return remaining.isEmpty ? nil : remaining
+        }
+
+        guard let tabId else { return }
+        forceCloseTabIds.remove(tabId)
+        pendingCloseConfirmTabIds.remove(tabId)
+        explicitUserCloseTabIds.remove(tabId)
+        postCloseSelectTabId.removeValue(forKey: tabId)
+        pendingClosedBrowserRestoreSnapshots.removeValue(forKey: tabId)
+        detachingTabIds.remove(tabId)
+        if pendingTabSelection?.tabId == tabId {
+            pendingTabSelection = nil
+        }
+        if !preservesDetachedSurface {
+            pendingDetachedSurfaces.removeValue(forKey: tabId)
+        }
+    }
+
 #if DEBUG
     private func debugElapsedMs(since start: TimeInterval) -> String {
         let ms = (ProcessInfo.processInfo.systemUptime - start) * 1000
