@@ -542,6 +542,33 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
         )
     }
 
+    func testWorkspaceGitMetadataBackgroundPollBatchIndicesRotateAndWrap() {
+        XCTAssertEqual(
+            TabManager.workspaceGitMetadataBackgroundPollBatchIndices(
+                totalCount: 5,
+                startIndex: 3,
+                limit: 4
+            ),
+            [3, 4, 0, 1]
+        )
+        XCTAssertEqual(
+            TabManager.workspaceGitMetadataBackgroundPollBatchIndices(
+                totalCount: 3,
+                startIndex: 10,
+                limit: 10
+            ),
+            [1, 2, 0]
+        )
+        XCTAssertEqual(
+            TabManager.workspaceGitMetadataBackgroundPollBatchIndices(
+                totalCount: 0,
+                startIndex: 0,
+                limit: 10
+            ),
+            []
+        )
+    }
+
     func testTrackedWorkspaceGitMetadataPollCandidatesExcludeDirectoriesWithoutResolvedGitMetadata() throws {
         let fileManager = FileManager.default
         let directoryURL = fileManager.temporaryDirectory.appendingPathComponent(

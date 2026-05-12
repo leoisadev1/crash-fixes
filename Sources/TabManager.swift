@@ -914,6 +914,7 @@ class TabManager: ObservableObject {
     static var nextPortOrdinal: Int = 0
     private nonisolated static let initialWorkspaceGitProbeDelays: [TimeInterval] = [0, 0.5, 1.5, 3.0, 6.0, 10.0]
     private nonisolated static let backgroundPollInterval: TimeInterval = 60
+    private nonisolated static let backgroundGitMetadataPollBatchLimit = 32
     private nonisolated static let selectedPollInterval: TimeInterval = 10
     private nonisolated static let workspacePullRequestRepoCacheLifetime: TimeInterval = 15
     private nonisolated static let workspacePullRequestRepoCachePruneLifetime: TimeInterval = 60
@@ -1020,6 +1021,7 @@ class TabManager: ObservableObject {
     private var workspaceGitMetadataSnapshotCacheByDirectory: [
         String: (capturedAt: Date, snapshot: InitialWorkspaceGitMetadataSnapshot)
     ] = [:]
+    private var workspaceGitMetadataBackgroundPollCursor: Int = 0
     private var workspacePullRequestProbeStateByKey: [WorkspaceGitProbeKey: WorkspaceGitProbeState] = [:]
     private var workspacePullRequestNextPollAtByKey: [WorkspaceGitProbeKey: Date] = [:]
     private var workspacePullRequestLastTerminalStateRefreshAtByKey: [WorkspaceGitProbeKey: Date] = [:]
@@ -1213,20 +1215,61 @@ class TabManager: ObservableObject {
         )
     }
 
-    private func refreshTrackedWorkspaceGitMetadata() {
+    private func refreshTrackedWorkspaceGitMetadata(batchLimitOverride: Int? = nil) {
         let activeProbeKeys = activeWorkspaceGitProbeKeys
+        var candidates: [WorkspaceGitProbeKey] = []
 
         for workspace in tabs {
-            for panelId in trackedWorkspaceGitMetadataPollCandidatePanelIds(
+            let panelIds = trackedWorkspaceGitMetadataPollCandidatePanelIds(
                 in: workspace,
                 activeProbeKeys: activeProbeKeys
-            ) {
-                scheduleWorkspaceGitMetadataRefreshIfPossible(
-                    workspaceId: workspace.id,
-                    panelId: panelId,
-                    reason: "periodicPoll"
-                )
+            )
+            for panelId in panelIds {
+                candidates.append(WorkspaceGitProbeKey(workspaceId: workspace.id, panelId: panelId))
             }
+        }
+
+        candidates.sort {
+            if $0.workspaceId != $1.workspaceId {
+                return $0.workspaceId.uuidString < $1.workspaceId.uuidString
+            }
+            return $0.panelId.uuidString < $1.panelId.uuidString
+        }
+
+        guard !candidates.isEmpty else {
+            workspaceGitMetadataBackgroundPollCursor = 0
+            return
+        }
+
+        let batchIndices = Self.workspaceGitMetadataBackgroundPollBatchIndices(
+            totalCount: candidates.count,
+            startIndex: workspaceGitMetadataBackgroundPollCursor,
+            limit: batchLimitOverride ?? Self.backgroundGitMetadataPollBatchLimit
+        )
+        workspaceGitMetadataBackgroundPollCursor = batchIndices.last.map {
+            ($0 + 1) % candidates.count
+        } ?? 0
+
+        for index in batchIndices {
+            let key = candidates[index]
+            scheduleWorkspaceGitMetadataRefreshIfPossible(
+                workspaceId: key.workspaceId,
+                panelId: key.panelId,
+                reason: "periodicPoll"
+            )
+        }
+    }
+
+    nonisolated static func workspaceGitMetadataBackgroundPollBatchIndices(
+        totalCount: Int,
+        startIndex: Int,
+        limit: Int
+    ) -> [Int] {
+        guard totalCount > 0, limit > 0 else { return [] }
+        let normalizedStart = ((startIndex % totalCount) + totalCount) % totalCount
+        let count = min(totalCount, limit)
+        return (0..<count).map { offset in
+            (normalizedStart + offset) % totalCount
         }
     }
 
@@ -1798,7 +1841,7 @@ class TabManager: ObservableObject {
     }
 
     func refreshTrackedWorkspaceGitMetadataForTesting() {
-        refreshTrackedWorkspaceGitMetadata()
+        refreshTrackedWorkspaceGitMetadata(batchLimitOverride: Int.max)
     }
 
     func trackedWorkspaceGitMetadataPollCandidatePanelIdsForTesting(workspaceId: UUID) -> Set<UUID> {
