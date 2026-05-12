@@ -442,7 +442,7 @@ extension Workspace {
 #else
             let allowDebugFallbackScrollback = false
 #endif
-            let capturedScrollback = includeScrollback && shouldPersistScrollback
+            let capturedScrollback = includeScrollback && shouldPersistScrollback && !allowDebugFallbackScrollback
                 ? TerminalController.shared.readTerminalTextForSnapshot(
                     terminalPanel: terminalPanel,
                     includeScrollback: true,
