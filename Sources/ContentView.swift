@@ -12561,10 +12561,10 @@ private struct TabItemView: View, Equatable {
                 "desc=\"\(debugCommandPaletteTextPreview(description))\""
             )
 #endif
-            refreshWorkspaceSnapshot()
+            refreshWorkspaceSnapshot(reuseExpensiveSections: true)
         }
         .onReceive(
-            tab.sidebarObservationPublisher
+            tab.sidebarCheapObservationPublisher
                 .receive(on: RunLoop.main)
                 // Prompt-time sidebar telemetry can arrive as a short burst
                 // (pwd, branch, PR, shell state). Coalesce that burst so the
@@ -12576,6 +12576,23 @@ private struct TabItemView: View, Equatable {
             cmuxDebugLog(
                 "sidebar.row.invalidate workspace=\(tab.id.uuidString.prefix(8)) " +
                 "source=debounced " +
+                "title=\"\(debugCommandPaletteTextPreview(tab.title))\" " +
+                "descLen=\((description as NSString).length) " +
+                "desc=\"\(debugCommandPaletteTextPreview(description))\""
+            )
+#endif
+            refreshWorkspaceSnapshot(reuseExpensiveSections: true)
+        }
+        .onReceive(
+            tab.sidebarExpensiveObservationPublisher
+                .receive(on: RunLoop.main)
+                .debounce(for: Self.workspaceObservationCoalesceInterval, scheduler: RunLoop.main)
+        ) { _ in
+#if DEBUG
+            let description = tab.customDescription ?? ""
+            cmuxDebugLog(
+                "sidebar.row.invalidate workspace=\(tab.id.uuidString.prefix(8)) " +
+                "source=expensive " +
                 "title=\"\(debugCommandPaletteTextPreview(tab.title))\" " +
                 "descLen=\((description as NSString).length) " +
                 "desc=\"\(debugCommandPaletteTextPreview(description))\""
@@ -12640,8 +12657,10 @@ private struct TabItemView: View, Equatable {
         }
     }
 
-    private func refreshWorkspaceSnapshot(force: Bool = false) {
-        let nextSnapshot = makeWorkspaceSnapshot()
+    private func refreshWorkspaceSnapshot(force: Bool = false, reuseExpensiveSections: Bool = false) {
+        let nextSnapshot = makeWorkspaceSnapshot(
+            reusingExpensiveSectionsFrom: (!force && reuseExpensiveSections) ? workspaceSnapshotStorage : nil
+        )
         let decision = SidebarWorkspaceSnapshotRefreshPolicy.decision(
             current: workspaceSnapshotStorage,
             next: nextSnapshot,
@@ -13186,12 +13205,18 @@ private struct TabItemView: View, Equatable {
         }
     }
 
-    private func makeWorkspaceSnapshot() -> SidebarWorkspaceSnapshotBuilder.Snapshot {
+    private func makeWorkspaceSnapshot(
+        reusingExpensiveSectionsFrom previous: SidebarWorkspaceSnapshotBuilder.Snapshot? = nil
+    ) -> SidebarWorkspaceSnapshotBuilder.Snapshot {
         let detailVisibility = visibleAuxiliaryDetails
-        let orderedPanelIds: [UUID]? = (detailVisibility.showsBranchDirectory || detailVisibility.showsPullRequests)
+        let canReuseExpensiveSections = previous != nil
+        let orderedPanelIds: [UUID]? = (!canReuseExpensiveSections && (detailVisibility.showsBranchDirectory || detailVisibility.showsPullRequests))
             ? tab.sidebarOrderedPanelIds()
             : nil
         let compactGitBranchSummaryText: String? = {
+            if let previous {
+                return previous.compactGitBranchSummaryText
+            }
             guard detailVisibility.showsBranchDirectory,
                   !sidebarBranchVerticalLayout,
                   sidebarShowGitBranch,
@@ -13201,6 +13226,9 @@ private struct TabItemView: View, Equatable {
             return gitBranchSummaryText(orderedPanelIds: orderedPanelIds)
         }()
         let compactDirectorySummaryText: String? = {
+            guard previous == nil else {
+                return nil
+            }
             guard detailVisibility.showsBranchDirectory,
                   !sidebarBranchVerticalLayout,
                   let orderedPanelIds else {
@@ -13208,11 +13236,15 @@ private struct TabItemView: View, Equatable {
             }
             return directorySummaryText(orderedPanelIds: orderedPanelIds)
         }()
-        let compactBranchDirectoryRow = branchDirectoryRow(
-            gitSummary: compactGitBranchSummaryText,
-            directorySummary: compactDirectorySummaryText
-        )
+        let compactBranchDirectoryRow = previous?.compactBranchDirectoryRow
+            ?? branchDirectoryRow(
+                gitSummary: compactGitBranchSummaryText,
+                directorySummary: compactDirectorySummaryText
+            )
         let branchDirectoryLines: [SidebarWorkspaceSnapshotBuilder.VerticalBranchDirectoryLine] = {
+            if let previous {
+                return previous.branchDirectoryLines
+            }
             guard detailVisibility.showsBranchDirectory,
                   sidebarBranchVerticalLayout,
                   let orderedPanelIds else {
@@ -13220,8 +13252,12 @@ private struct TabItemView: View, Equatable {
             }
             return verticalBranchDirectoryLines(orderedPanelIds: orderedPanelIds)
         }()
-        let branchLinesContainBranch = sidebarShowGitBranch && branchDirectoryLines.contains { $0.branch != nil }
+        let branchLinesContainBranch = previous?.branchLinesContainBranch
+            ?? (sidebarShowGitBranch && branchDirectoryLines.contains { $0.branch != nil })
         let pullRequestRows: [SidebarWorkspaceSnapshotBuilder.PullRequestDisplay] = {
+            if let previous {
+                return previous.pullRequestRows
+            }
             guard detailVisibility.showsPullRequests, let orderedPanelIds else { return [] }
             return pullRequestDisplays(orderedPanelIds: orderedPanelIds)
         }()

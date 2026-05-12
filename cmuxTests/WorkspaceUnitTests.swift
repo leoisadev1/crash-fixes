@@ -4284,6 +4284,56 @@ final class WorkspacePanelGitBranchTests: XCTestCase {
         )
     }
 
+    func testSidebarObservationPublishersSeparateCheapAndExpensiveChanges() {
+        let workspace = Workspace()
+        guard let panelId = workspace.focusedPanelId else {
+            XCTFail("Expected initial focused panel")
+            return
+        }
+
+        var cheapPublishCount = 0
+        var expensivePublishCount = 0
+        let cheapCancellable = workspace.sidebarCheapObservationPublisher.sink {
+            cheapPublishCount += 1
+        }
+        let expensiveCancellable = workspace.sidebarExpensiveObservationPublisher.sink {
+            expensivePublishCount += 1
+        }
+        defer {
+            cheapCancellable.cancel()
+            expensiveCancellable.cancel()
+        }
+
+        workspace.statusEntries["agent"] = SidebarStatusEntry(
+            key: "agent",
+            value: "running"
+        )
+
+        XCTAssertEqual(
+            cheapPublishCount,
+            1,
+            "Expected status updates to invalidate the cheap sidebar snapshot path"
+        )
+        XCTAssertEqual(
+            expensivePublishCount,
+            0,
+            "Status-only updates must not trigger branch/directory/PR recomputation"
+        )
+
+        workspace.updatePanelGitBranch(panelId: panelId, branch: "feature/sidebar", isDirty: false)
+
+        XCTAssertEqual(
+            cheapPublishCount,
+            1,
+            "Git branch updates should stay out of the cheap telemetry path"
+        )
+        XCTAssertGreaterThan(
+            expensivePublishCount,
+            0,
+            "Git branch updates should invalidate branch/directory/PR sidebar sections"
+        )
+    }
+
     @MainActor
     func testSidebarPullRequestsTrackFocusedPanelOnly() {
         let workspace = Workspace()
