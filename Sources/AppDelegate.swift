@@ -4817,6 +4817,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     terminalPanel.surface.forceRefresh(reason: reason)
                 }
             )
+            terminalPanel.surface.rememberCurrentFontPointsForConfigInheritanceAfterConfigReload()
             refreshedCount += 1
         }
 #if DEBUG

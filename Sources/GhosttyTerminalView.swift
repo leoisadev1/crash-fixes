@@ -3982,6 +3982,7 @@ class GhosttyApp {
             )
             return performOnMain {
                 GhosttyApp.shared.reloadSurfaceConfiguration(target.target.surface, soft: soft, source: "action.reload_config.surface tab=\(surfaceView.tabId?.uuidString ?? "nil") surface=\(surfaceView.terminalSurface?.id.uuidString ?? "nil")")
+                surfaceView.terminalSurface?.rememberCurrentFontPointsForConfigInheritanceAfterConfigReload()
                 surfaceView.terminalSurface?.hostedView.refreshHostBackgroundAfterGhosttyConfigReload()
                 surfaceView.terminalSurface?.forceRefresh(reason: "surface.reloadConfig")
                 return true
@@ -5585,6 +5586,9 @@ final class TerminalSurface: Identifiable, ObservableObject {
               self.surface == surface,
               registeredOwnerId == id,
               cmuxSurfacePointerAppearsLive(surface) else {
+            if self.surface == surface {
+                quarantineStaleRuntimeSurface(surface, reason: reason)
+            }
 #if DEBUG
             cmuxDebugLog(
                 "surface.input.drop surface=\(id.uuidString.prefix(8)) reason=\(reason) staleSurface=1"
@@ -5601,6 +5605,23 @@ final class TerminalSurface: Identifiable, ObservableObject {
             return false
         }
         return true
+    }
+
+    private func quarantineStaleRuntimeSurface(_ surface: ghostty_surface_t, reason: String) {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                guard self.surface == surface else { return }
+                _ = liveSurfaceForGhosttyAccess(reason: reason)
+            }
+            return
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.surface == surface else { return }
+                _ = self.liveSurfaceForGhosttyAccess(reason: reason)
+            }
+        }
     }
 
     func sendText(_ text: String) {
@@ -5962,6 +5983,11 @@ final class TerminalSurface: Identifiable, ObservableObject {
               let surface else {
             return
         }
+        rememberCurrentFontPointsForConfigInheritance(from: surface, fallback: 0)
+    }
+
+    func rememberCurrentFontPointsForConfigInheritanceAfterConfigReload() {
+        guard let surface else { return }
         rememberCurrentFontPointsForConfigInheritance(from: surface, fallback: 0)
     }
 
