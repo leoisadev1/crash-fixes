@@ -180,6 +180,8 @@ class TerminalController {
         .pane: [:],
         .surface: [:],
     ]
+    private nonisolated(unsafe) var v2SurfaceIdsByWorkspace: [UUID: Set<UUID>] = [:]
+    private nonisolated(unsafe) var v2RemoteWorkspaceIds: Set<UUID> = []
     private nonisolated let v2HandleRefLock = NSLock()
 
     private struct V2BrowserElementRefEntry {
@@ -476,8 +478,10 @@ class TerminalController {
         private let queue = DispatchQueue(label: "com.cmux.socket-fast-path")
         private var lastReportedDirectories: [SocketSurfaceKey: String] = [:]
         private var lastReportedShellStates: [SocketSurfaceKey: Workspace.PanelShellActivityState] = [:]
+        private var lastReportedTTYNames: [SocketSurfaceKey: String] = [:]
         private let maxTrackedDirectories = 4096
         private let maxTrackedShellStates = 4096
+        private let maxTrackedTTYNames = 4096
 
         func shouldPublishDirectory(workspaceId: UUID, panelId: UUID, directory: String) -> Bool {
             let key = SocketSurfaceKey(workspaceId: workspaceId, panelId: panelId)
@@ -507,6 +511,20 @@ class TerminalController {
                     lastReportedShellStates.removeAll(keepingCapacity: true)
                 }
                 lastReportedShellStates[key] = state
+                return true
+            }
+        }
+
+        func shouldPublishTTYName(workspaceId: UUID, panelId: UUID, ttyName: String) -> Bool {
+            let key = SocketSurfaceKey(workspaceId: workspaceId, panelId: panelId)
+            return queue.sync {
+                if lastReportedTTYNames[key] == ttyName {
+                    return false
+                }
+                if lastReportedTTYNames.count >= maxTrackedTTYNames {
+                    lastReportedTTYNames.removeAll(keepingCapacity: true)
+                }
+                lastReportedTTYNames[key] = ttyName
                 return true
             }
         }
@@ -1493,6 +1511,12 @@ class TerminalController {
         let params: [String: Any]
     }
 
+    private enum V2HotTelemetrySurfaceLookup {
+        case unknown
+        case missing
+        case found(isRemoteWorkspace: Bool)
+    }
+
     private nonisolated static let socketWorkerV2Methods: Set<String> = [
         "auth.status",
         "auth.begin_sign_in",
@@ -1536,6 +1560,293 @@ class TerminalController {
             method: method,
             params: dict["params"] as? [String: Any] ?? [:]
         )
+    }
+
+    private nonisolated func v2StrictUUIDParam(_ params: [String: Any], _ key: String) -> UUID? {
+        guard let raw = params[key] as? String else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return UUID(uuidString: trimmed)
+    }
+
+    private nonisolated func v2TrimmedStringParam(_ params: [String: Any], _ key: String) -> String? {
+        guard let raw = params[key] as? String else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private nonisolated func v2KnownHotTelemetrySurfaceLookup(
+        workspaceId: UUID,
+        surfaceId: UUID
+    ) -> V2HotTelemetrySurfaceLookup {
+        v2HandleRefLock.lock()
+        let surfaces = v2SurfaceIdsByWorkspace[workspaceId]
+        let isRemoteWorkspace = v2RemoteWorkspaceIds.contains(workspaceId)
+        v2HandleRefLock.unlock()
+
+        guard let surfaces else { return .unknown }
+        return surfaces.contains(surfaceId)
+            ? .found(isRemoteWorkspace: isRemoteWorkspace)
+            : .missing
+    }
+
+    private nonisolated func v2HotTelemetrySurfacePayload(
+        workspaceId: UUID,
+        surfaceId: UUID,
+        extras: [String: Any] = [:]
+    ) -> [String: Any] {
+        var payload: [String: Any] = [
+            "workspace_id": workspaceId.uuidString,
+            "workspace_ref": v2LookupRef(kind: .workspace, uuid: workspaceId),
+            "surface_id": surfaceId.uuidString,
+            "surface_ref": v2LookupRef(kind: .surface, uuid: surfaceId),
+        ]
+        for (key, value) in extras {
+            payload[key] = value
+        }
+        return payload
+    }
+
+    private nonisolated func v2HotTelemetrySurfaceNotFound(
+        id: Any?,
+        workspaceId: UUID,
+        surfaceId: UUID
+    ) -> String {
+        v2Error(
+            id: id,
+            code: "not_found",
+            message: "Surface not found",
+            data: v2HotTelemetrySurfacePayload(workspaceId: workspaceId, surfaceId: surfaceId)
+        )
+    }
+
+    private nonisolated func scheduleHotExplicitSurfaceTelemetry(
+        workspaceId: UUID,
+        surfaceId: UUID,
+        ttyName: String?,
+        reason: WorkspaceRemoteSessionController.PortScanKickReason?,
+        isRemoteWorkspace: Bool
+    ) {
+        if !isRemoteWorkspace {
+            if let ttyName {
+                PortScanner.shared.registerTTY(workspaceId: workspaceId, panelId: surfaceId, ttyName: ttyName)
+            }
+            if reason != nil {
+                PortScanner.shared.kick(workspaceId: workspaceId, panelId: surfaceId)
+            }
+        }
+
+        guard isRemoteWorkspace || ttyName != nil else { return }
+        Task { @MainActor [weak self] in
+            self?.applyExplicitSurfaceTelemetry(
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                ttyName: ttyName,
+                reason: isRemoteWorkspace ? reason : nil
+            )
+        }
+    }
+
+    private nonisolated func socketWorkerHotTelemetryResponseIfNeeded(_ request: V2SocketRequest) -> String? {
+        switch request.method {
+        case "surface.report_tty":
+            guard let workspaceId = v2StrictUUIDParam(request.params, "workspace_id"),
+                  let surfaceId = v2StrictUUIDParam(request.params, "surface_id") else {
+                return nil
+            }
+            guard let ttyName = v2TrimmedStringParam(request.params, "tty_name") else {
+                return v2Error(id: request.id, code: "invalid_params", message: "Missing tty_name")
+            }
+            switch v2KnownHotTelemetrySurfaceLookup(workspaceId: workspaceId, surfaceId: surfaceId) {
+            case .unknown:
+                return nil
+            case .missing:
+                return v2HotTelemetrySurfaceNotFound(id: request.id, workspaceId: workspaceId, surfaceId: surfaceId)
+            case .found(let isRemoteWorkspace):
+                let shouldPublishTTY = Self.socketFastPathState.shouldPublishTTYName(
+                    workspaceId: workspaceId,
+                    panelId: surfaceId,
+                    ttyName: ttyName
+                )
+                if shouldPublishTTY {
+                    scheduleHotExplicitSurfaceTelemetry(
+                        workspaceId: workspaceId,
+                        surfaceId: surfaceId,
+                        ttyName: ttyName,
+                        reason: nil,
+                        isRemoteWorkspace: isRemoteWorkspace
+                    )
+                }
+                return v2Ok(
+                    id: request.id,
+                    result: v2HotTelemetrySurfacePayload(
+                        workspaceId: workspaceId,
+                        surfaceId: surfaceId,
+                        extras: ["tty_name": ttyName]
+                    )
+                )
+            }
+
+        case "surface.ports_kick":
+            guard let workspaceId = v2StrictUUIDParam(request.params, "workspace_id"),
+                  let surfaceId = v2StrictUUIDParam(request.params, "surface_id") else {
+                return nil
+            }
+            let reason: WorkspaceRemoteSessionController.PortScanKickReason
+            if let rawReason = v2TrimmedStringParam(request.params, "reason") {
+                guard let parsedReason = Self.parseRemotePortScanKickReason(rawReason) else {
+                    return v2Error(
+                        id: request.id,
+                        code: "invalid_params",
+                        message: "reason must be command or refresh"
+                    )
+                }
+                reason = parsedReason
+            } else {
+                reason = .command
+            }
+            switch v2KnownHotTelemetrySurfaceLookup(workspaceId: workspaceId, surfaceId: surfaceId) {
+            case .unknown:
+                return nil
+            case .missing:
+                return v2HotTelemetrySurfaceNotFound(id: request.id, workspaceId: workspaceId, surfaceId: surfaceId)
+            case .found(let isRemoteWorkspace):
+                scheduleHotExplicitSurfaceTelemetry(
+                    workspaceId: workspaceId,
+                    surfaceId: surfaceId,
+                    ttyName: nil,
+                    reason: reason,
+                    isRemoteWorkspace: isRemoteWorkspace
+                )
+                return v2Ok(
+                    id: request.id,
+                    result: v2HotTelemetrySurfacePayload(
+                        workspaceId: workspaceId,
+                        surfaceId: surfaceId,
+                        extras: ["reason": reason.rawValue]
+                    )
+                )
+            }
+
+        case "surface.report_shell_state":
+            guard let workspaceId = v2StrictUUIDParam(request.params, "workspace_id"),
+                  let surfaceId = v2StrictUUIDParam(request.params, "surface_id") else {
+                return nil
+            }
+            let rawState = v2TrimmedStringParam(request.params, "state")
+                ?? v2TrimmedStringParam(request.params, "shell_state")
+                ?? v2TrimmedStringParam(request.params, "activity")
+            guard let rawState,
+                  let state = Self.parseReportedShellActivityState(rawState) else {
+                return v2Error(
+                    id: request.id,
+                    code: "invalid_params",
+                    message: "state must be prompt, running, or unknown"
+                )
+            }
+            switch v2KnownHotTelemetrySurfaceLookup(workspaceId: workspaceId, surfaceId: surfaceId) {
+            case .unknown:
+                return nil
+            case .missing:
+                return v2HotTelemetrySurfaceNotFound(id: request.id, workspaceId: workspaceId, surfaceId: surfaceId)
+            case .found:
+                let shouldPublish = Self.socketFastPathState.shouldPublishShellActivity(
+                    workspaceId: workspaceId,
+                    panelId: surfaceId,
+                    state: state
+                )
+                if shouldPublish {
+                    Task { @MainActor in
+                        guard let tabManager = AppDelegate.shared?.tabManagerFor(tabId: workspaceId) else { return }
+                        tabManager.updateSurfaceShellActivity(
+                            tabId: workspaceId,
+                            surfaceId: surfaceId,
+                            state: state
+                        )
+                    }
+                }
+                return v2Ok(
+                    id: request.id,
+                    result: v2HotTelemetrySurfacePayload(
+                        workspaceId: workspaceId,
+                        surfaceId: surfaceId,
+                        extras: [
+                            "state": state.rawValue,
+                            "published": shouldPublish,
+                        ]
+                    )
+                )
+            }
+
+        case "surface.telemetry":
+            guard let workspaceId = v2StrictUUIDParam(request.params, "workspace_id"),
+                  let surfaceId = v2StrictUUIDParam(request.params, "surface_id") else {
+                return nil
+            }
+            let ttyName = v2TrimmedStringParam(request.params, "tty_name")
+            let reason: WorkspaceRemoteSessionController.PortScanKickReason?
+            if let rawReason = v2TrimmedStringParam(request.params, "reason") {
+                guard let parsedReason = Self.parseRemotePortScanKickReason(rawReason) else {
+                    return v2Error(
+                        id: request.id,
+                        code: "invalid_params",
+                        message: "reason must be command or refresh"
+                    )
+                }
+                reason = parsedReason
+            } else {
+                reason = nil
+            }
+            guard ttyName != nil || reason != nil else {
+                return v2Error(
+                    id: request.id,
+                    code: "invalid_params",
+                    message: "surface.telemetry requires tty_name and/or reason"
+                )
+            }
+            switch v2KnownHotTelemetrySurfaceLookup(workspaceId: workspaceId, surfaceId: surfaceId) {
+            case .unknown:
+                return nil
+            case .missing:
+                return v2HotTelemetrySurfaceNotFound(id: request.id, workspaceId: workspaceId, surfaceId: surfaceId)
+            case .found(let isRemoteWorkspace):
+                let ttyNameToPublish: String?
+                if let ttyName,
+                   Self.socketFastPathState.shouldPublishTTYName(
+                    workspaceId: workspaceId,
+                    panelId: surfaceId,
+                    ttyName: ttyName
+                   ) {
+                    ttyNameToPublish = ttyName
+                } else {
+                    ttyNameToPublish = nil
+                }
+                if ttyNameToPublish != nil || reason != nil {
+                    scheduleHotExplicitSurfaceTelemetry(
+                        workspaceId: workspaceId,
+                        surfaceId: surfaceId,
+                        ttyName: ttyNameToPublish,
+                        reason: reason,
+                        isRemoteWorkspace: isRemoteWorkspace
+                    )
+                }
+
+                return v2Ok(
+                    id: request.id,
+                    result: v2HotTelemetrySurfacePayload(
+                        workspaceId: workspaceId,
+                        surfaceId: surfaceId,
+                        extras: [
+                            "tty_name": v2OrNull(ttyName),
+                            "reason": v2OrNull(reason?.rawValue),
+                        ]
+                    )
+                )
+            }
+
+        default:
+            return nil
+        }
     }
 
     private nonisolated func socketWorkerV2ResponseIfNeeded(for command: String) -> String? {
@@ -2002,6 +2313,11 @@ class TerminalController {
                 code: "invalid_dispatch",
                 message: "\(request.method) must run off the main thread"
             )
+        }
+
+        if let request = parseV2SocketRequest(command),
+           let response = socketWorkerHotTelemetryResponseIfNeeded(request) {
+            return response
         }
 
         if let response = socketWorkerV2ResponseIfNeeded(for: command) {
@@ -3943,7 +4259,7 @@ class TerminalController {
         return s
     }
 
-    private func withV2HandleRefs<T>(_ body: () -> T) -> T {
+    private nonisolated func withV2HandleRefs<T>(_ body: () -> T) -> T {
         v2HandleRefLock.lock()
         defer { v2HandleRefLock.unlock() }
         return body()
@@ -4019,6 +4335,16 @@ class TerminalController {
         }
     }
 
+    private func v2UpdateHotTelemetrySurfaceCache(
+        surfaceIdsByWorkspace: [UUID: Set<UUID>],
+        remoteWorkspaceIds: Set<UUID>
+    ) {
+        withV2HandleRefs {
+            v2SurfaceIdsByWorkspace = surfaceIdsByWorkspace
+            v2RemoteWorkspaceIds = remoteWorkspaceIds
+        }
+    }
+
     func v2ResolveHandleRef(_ handle: String) -> UUID? {
         withV2HandleRefs {
             for kind in V2HandleKind.allCases {
@@ -4037,7 +4363,7 @@ class TerminalController {
         }
     }
 
-    func v2LookupRef(kind: V2HandleKind, uuid: UUID?) -> Any {
+    nonisolated func v2LookupRef(kind: V2HandleKind, uuid: UUID?) -> Any {
         guard let uuid else { return NSNull() }
         return withV2HandleRefs {
             v2RefByUUID[kind]?[uuid] ?? NSNull()
@@ -4120,7 +4446,7 @@ class TerminalController {
     }
 
     private func v2RefreshKnownRefs() {
-        let validIDsByKind = v2MainSync { () -> [V2HandleKind: Set<UUID>]? in
+        let cacheState = v2MainSync { () -> ([V2HandleKind: Set<UUID>], [UUID: Set<UUID>], Set<UUID>)? in
             guard let app = AppDelegate.shared else { return nil }
 
             var validIDsByKind: [V2HandleKind: Set<UUID>] = [
@@ -4129,25 +4455,35 @@ class TerminalController {
                 .pane: [],
                 .surface: [],
             ]
+            var surfaceIdsByWorkspace: [UUID: Set<UUID>] = [:]
+            var remoteWorkspaceIds: Set<UUID> = []
             let windows = app.listMainWindowSummaries()
             for item in windows {
                 validIDsByKind[.window]?.insert(item.windowId)
                 if let tm = app.tabManagerFor(windowId: item.windowId) {
                     for ws in tm.tabs {
                         validIDsByKind[.workspace]?.insert(ws.id)
+                        if ws.isRemoteWorkspace {
+                            remoteWorkspaceIds.insert(ws.id)
+                        }
                         for paneId in ws.bonsplitController.allPaneIds {
                             validIDsByKind[.pane]?.insert(paneId.id)
                         }
+                        surfaceIdsByWorkspace[ws.id] = Set(ws.panels.keys)
                         for panelId in ws.panels.keys {
                             validIDsByKind[.surface]?.insert(panelId)
                         }
                     }
                 }
             }
-            return validIDsByKind
+            return (validIDsByKind, surfaceIdsByWorkspace, remoteWorkspaceIds)
         }
-        guard let validIDsByKind else { return }
+        guard let (validIDsByKind, surfaceIdsByWorkspace, remoteWorkspaceIds) = cacheState else { return }
         v2ReconcileHandleRefs(validIDsByKind: validIDsByKind)
+        v2UpdateHotTelemetrySurfaceCache(
+            surfaceIdsByWorkspace: surfaceIdsByWorkspace,
+            remoteWorkspaceIds: remoteWorkspaceIds
+        )
     }
 
     // MARK: - V2 Context Resolution
@@ -5541,6 +5877,56 @@ class TerminalController {
         }
 
         return result
+    }
+
+    @MainActor
+    private func applyExplicitSurfaceTelemetry(
+        workspaceId: UUID,
+        surfaceId: UUID,
+        ttyName: String?,
+        reason: WorkspaceRemoteSessionController.PortScanKickReason?
+    ) {
+        guard let tab = tabForSidebarMutation(id: workspaceId) else { return }
+        let validSurfaceIds = retainAndPruneSurfaces(
+            for: tab,
+            requestedSurfaceId: surfaceId
+        )
+        guard validSurfaceIds.contains(surfaceId) else {
+            if tab.isRemoteWorkspace {
+                if let ttyName {
+                    tab.rememberPendingRemoteSurfaceTTY(ttyName, requestedSurfaceId: surfaceId)
+                }
+                if let reason {
+                    tab.rememberPendingRemoteSurfacePortKick(
+                        reason: reason,
+                        requestedSurfaceId: surfaceId
+                    )
+                }
+            }
+            return
+        }
+
+        if let ttyName {
+            tab.surfaceTTYNames[surfaceId] = ttyName
+            if tab.isRemoteWorkspace {
+                tab.syncRemotePortScanTTYs()
+                _ = tab.applyPendingRemoteSurfacePortKickIfNeeded(to: surfaceId)
+            } else {
+                PortScanner.shared.registerTTY(
+                    workspaceId: workspaceId,
+                    panelId: surfaceId,
+                    ttyName: ttyName
+                )
+            }
+        }
+
+        if let reason {
+            if tab.isRemoteWorkspace {
+                tab.kickRemotePortScan(panelId: surfaceId, reason: reason)
+            } else {
+                PortScanner.shared.kick(workspaceId: workspaceId, panelId: surfaceId)
+            }
+        }
     }
 
     @MainActor
