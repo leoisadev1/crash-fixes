@@ -18334,11 +18334,9 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
         case .stop:
             if def.name == "codex", !sessionId.isEmpty {
                 let stopTurnId = input.turnId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                retireCodexMonitorLeases(
-                    sessionId: sessionId,
-                    turnId: stopTurnId.isEmpty ? nil : stopTurnId,
-                    env: env
-                )
+                if !stopTurnId.isEmpty {
+                    retireCodexMonitorLeases(sessionId: sessionId, turnId: stopTurnId, env: env)
+                }
             }
             do {
                 let mapped = sessionId.isEmpty ? nil : (try? store.lookup(sessionId: sessionId))
