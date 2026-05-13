@@ -189,17 +189,9 @@ extension Workspace {
                 )
             }
 
-        let statusSnapshots = statusEntries.values
-            .sorted { lhs, rhs in lhs.key < rhs.key }
-            .map { entry in
-                SessionStatusEntrySnapshot(
-                    key: entry.key,
-                    value: entry.value,
-                    icon: entry.icon,
-                    color: entry.color,
-                    timestamp: entry.timestamp.timeIntervalSince1970
-                )
-            }
+        // Status entries are runtime-only agent/UI state. Restore intentionally
+        // clears them, so persisting them only adds large-session autosave churn.
+        let statusSnapshots: [SessionStatusEntrySnapshot] = []
         let logSnapshots = logEntries.map { entry in
             SessionLogEntrySnapshot(
                 message: entry.message,

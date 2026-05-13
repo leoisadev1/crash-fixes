@@ -53,6 +53,28 @@ final class TabManagerSessionSnapshotTests: XCTestCase {
         XCTAssertNotEqual(titleChanged, manager.sessionAutosaveFingerprint())
     }
 
+    func testSessionSnapshotDoesNotPersistRuntimeStatusEntries() {
+        let manager = TabManager()
+        guard let workspace = manager.selectedWorkspace else {
+            XCTFail("Expected initial workspace")
+            return
+        }
+
+        workspace.statusEntries["codex"] = SidebarStatusEntry(
+            key: "codex",
+            value: "Running",
+            icon: "terminal",
+            color: "green"
+        )
+
+        let snapshot = manager.sessionSnapshot(includeScrollback: false)
+        XCTAssertTrue(snapshot.workspaces.first?.statusEntries.isEmpty == true)
+
+        let restored = TabManager()
+        restored.restoreSessionSnapshot(snapshot)
+        XCTAssertTrue(restored.tabs.first?.statusEntries.isEmpty == true)
+    }
+
     func testRestoreSessionSnapshotWithNoWorkspacesKeepsSingleFallbackWorkspace() {
         let manager = TabManager()
         let emptySnapshot = SessionTabManagerSnapshot(
