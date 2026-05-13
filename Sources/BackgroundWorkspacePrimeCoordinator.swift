@@ -97,8 +97,8 @@ final class BackgroundWorkspacePrimeCoordinator {
         // Explicit for the required_deinit lint; per-prime resources live on Waiter.
     }
 
-    func taskKey(for tabManager: TabManager) -> Set<UUID> {
-        tabManager.pendingBackgroundWorkspaceLoadIds
+    func taskKey(for tabManager: TabManager) -> Bool {
+        !tabManager.pendingBackgroundWorkspaceLoadIds.isEmpty
     }
 
     func primePendingBackgroundWorkspaces(tabManager: TabManager) async {
@@ -132,6 +132,12 @@ final class BackgroundWorkspacePrimeCoordinator {
         guard tabManager.pendingBackgroundWorkspaceLoadIds.contains(workspaceId) else {
             tabManager.releaseBackgroundWorkspaceMount(for: workspaceId)
             return .alreadyCleared
+        }
+        tabManager.retainBackgroundWorkspaceMount(for: workspaceId)
+        defer {
+            if tabManager.pendingBackgroundWorkspaceLoadIds.contains(workspaceId) {
+                tabManager.releaseBackgroundWorkspaceMount(for: workspaceId)
+            }
         }
 
 #if DEBUG

@@ -8329,7 +8329,7 @@ final class Workspace: Identifiable, ObservableObject {
         return orderedTargets
     }
     func requestBackgroundPrimeTerminalSurfaceStartIfNeeded() {
-        backgroundPrimeTerminalPanels.first?.surface.requestBackgroundSurfaceStartIfNeeded()
+        backgroundPrimeTerminalPanels.first?.surface.requestBackgroundSurfaceStartIfNeeded(allowDetachedView: true)
     }
     func hasLoadedBackgroundPrimeTerminalSurface() -> Bool {
         backgroundPrimeTerminalPanels.first?.surface.hasLiveSurface ?? true
@@ -11653,15 +11653,14 @@ final class Workspace: Identifiable, ObservableObject {
     }
 
     func setPortalRenderingEnabled(_ enabled: Bool, reason: String) {
-        let changed = portalRenderingEnabled != enabled
+        // Mount reconciliation touches every workspace; make unchanged states cheap.
+        guard portalRenderingEnabled != enabled else { return }
         portalRenderingEnabled = enabled
         if enabled {
-            if changed {
-                beginEventDrivenLayoutFollowUp(
-                    reason: reason,
-                    includeGeometry: true
-                )
-            }
+            beginEventDrivenLayoutFollowUp(
+                reason: reason,
+                includeGeometry: true
+            )
         } else {
             clearLayoutFollowUp()
             hideAllTerminalPortalViews()
